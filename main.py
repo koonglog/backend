@@ -991,3 +991,160 @@ def export_noise_distribution(db: Session = Depends(get_db)):
         })
 
     return {"data": rows, "total": len(rows)}
+
+# --- 대시보드 ---
+
+@app.get("/api/v1/dashboard/households")
+def get_dashboard_households(db: Session = Depends(get_db)):
+    """전체 모니터링 세대 목록"""
+    households = db.query(models.Household).all()
+    today = date.today()
+
+    result = []
+    for household in households:
+        logs_today = db.query(models.NoiseLog).filter(
+            models.NoiseLog.household_id == household.id,
+            func.date(models.NoiseLog.timestamp) == today
+        ).all()
+
+        total_today = len(logs_today)
+        high_today = sum(1 for l in logs_today if l.severity == "high")
+        latest_log = db.query(models.NoiseLog).filter(
+            models.NoiseLog.household_id == household.id
+        ).order_by(models.NoiseLog.timestamp.desc()).first()
+
+        if total_today >= 7 or high_today >= 3:
+            status = "urgent"
+            status_label = "즉시 대응 필요"
+        elif total_today >= 3:
+            status = "caution"
+            status_label = "관찰 필요"
+        else:
+            status = "normal"
+            status_label = "정상"
+
+        result.append({
+            "household_id": household.id,
+            "alias": household.alias,
+            "building_name": household.building_name,
+            "unit_number": household.unit_number,
+            "status": status,
+            "status_label": status_label,
+            "today_count": total_today,
+            "high_count": high_today,
+            "latest_time": latest_log.timestamp if latest_log else None
+        })
+
+    return {"households": result, "total": len(result)}
+
+@app.get("/api/v1/dashboard/urgent")
+def get_urgent_households(db: Session = Depends(get_db)):
+    """긴급 대응 필요 세대"""
+    households = db.query(models.Household).all()
+    today = date.today()
+
+    result = []
+    for household in households:
+        logs_today = db.query(models.NoiseLog).filter(
+            models.NoiseLog.household_id == household.id,
+            func.date(models.NoiseLog.timestamp) == today
+        ).all()
+
+        total_today = len(logs_today)
+        high_today = sum(1 for l in logs_today if l.severity == "high")
+
+        if total_today >= 7 or high_today >= 3:
+            latest_log = db.query(models.NoiseLog).filter(
+                models.NoiseLog.household_id == household.id
+            ).order_by(models.NoiseLog.timestamp.desc()).first()
+
+            avg_duration = 0
+            if logs_today:
+                durations = [l.duration_ms for l in logs_today if l.duration_ms]
+                avg_duration = round(sum(durations) / len(durations) / 60000, 1) if durations else 0
+
+            result.append({
+                "household_id": household.id,
+                "alias": household.alias,
+                "building_name": household.building_name,
+                "unit_number": household.unit_number,
+                "today_count": total_today,
+                "high_count": high_today,
+                "avg_duration_min": avg_duration,
+                "latest_time": latest_log.timestamp if latest_log else None
+            })
+
+    return {"urgent_households": result, "total": len(result)}
+
+@app.get("/api/v1/dashboard/today-events")
+def get_today_events(db: Session = Depends(get_db)):
+    """오늘 발생 소음 종합"""
+    today = date.today()
+    logs = db.query(models.NoiseLog).filter(
+        func.date(models.NoiseLog.timestamp) == today
+    ).order_by(models.NoiseLog.timestamp.desc()).all()
+
+    result = []
+    for log in logs:
+        household = db.query(models.Household).filter(
+            models.Household.id == log.household_id
+        ).first()
+
+        result.append({
+            "id": log.id,
+            "alias": household.alias if household else None,
+            "building_name": household.building_name if household else None,
+            "unit_number": household.unit_number if household else None,
+            "event_type": log.event_type,
+            "severity": log.severity,
+            "sound_level": log.sound_level,
+            "duration_ms": log.duration_ms,
+            "is_night": log.is_night,
+            "timestamp": log.timestamp
+        })
+
+    return {"events": result, "total": len(result)}
+
+@app.get("/api/v1/dashboard/completed")
+def get_completed_actions(db: Session = Depends(get_db)):
+    """조치 완료 내역"""
+    mediations = db.query(models.Mediation).filter(
+        models.Mediation.status == "completed"
+    ).order_by(models.Mediation.created_at.desc()).all()
+
+    return {"completed": [
+        {
+            "id": m.id,
+            "target_unit": m.target_unit,
+            "admin_summary": m.admin_summary,
+            "recommended_action": m.recommended_action,
+            "created_at": m.created_at
+        } for m in mediations
+    ], "total": len(mediations)}
+
+@app.get("/api/v1/dashboard/hourly")
+def get_hourly_stats(db: Session = Depends(get_db)):
+    """최근 24시간 시간대별 소음 발생 현황"""
+    from datetime import timedelta
+    now = datetime.now()
+    since = now - timedelta(hours=24)
+
+    logs = db.query(models.NoiseLog).filter(
+        models.NoiseLog.timestamp >= since
+    ).all()
+
+    hourly = {}
+    for i in range(24):
+        hour = (now - timedelta(hours=23-i)).hour
+        hourly[f"{hour:02d}"] = {"total": 0, "high": 0, "night": 0}
+
+    for log in logs:
+        hour_key = f"{log.timestamp.hour:02d}"
+        if hour_key in hourly:
+            hourly[hour_key]["total"] += 1
+            if log.severity == "high":
+                hourly[hour_key]["high"] += 1
+            if log.is_night:
+                hourly[hour_key]["night"] += 1
+
+    return {"hourly": hourly, "period": "최근 24시간"}
