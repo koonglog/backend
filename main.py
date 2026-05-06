@@ -384,3 +384,78 @@ def get_admin_cases(db: Session = Depends(get_db)):
             "created_at": m.created_at
         } for m in mediations
     ]}
+
+# --- 공지사항 ---
+
+class NoticeCreate(BaseModel):
+    title: str
+    content: str
+    notice_type: str  # urgent, general, manner, equipment
+    target_type: str  # all, specific
+    target_households: Optional[list] = None
+
+class NoticeResponse(BaseModel):
+    id: int
+    title: str
+    content: str
+    notice_type: str
+    target_type: str
+    target_households: Optional[str] = None
+    status: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+@app.post("/api/v1/notices")
+def create_notice(data: NoticeCreate, db: Session = Depends(get_db)):
+    new_notice = models.Notice(
+        title=data.title,
+        content=data.content,
+        notice_type=data.notice_type,
+        target_type=data.target_type,
+        target_households=json.dumps(data.target_households) if data.target_households else None,
+        status="sent",
+        sent_at=datetime.now()
+    )
+    db.add(new_notice)
+    db.commit()
+    db.refresh(new_notice)
+    return {"status": "success", "notice_id": new_notice.id}
+
+@app.get("/api/v1/notices", response_model=List[NoticeResponse])
+def get_notices(notice_type: Optional[str] = None, db: Session = Depends(get_db)):
+    query = db.query(models.Notice).order_by(models.Notice.created_at.desc())
+    if notice_type:
+        query = query.filter(models.Notice.notice_type == notice_type)
+    return query.all()
+
+@app.get("/api/v1/notices/{notice_id}", response_model=NoticeResponse)
+def get_notice(notice_id: int, db: Session = Depends(get_db)):
+    notice = db.query(models.Notice).filter(models.Notice.id == notice_id).first()
+    if not notice:
+        raise HTTPException(status_code=404, detail="공지사항을 찾을 수 없습니다.")
+    return notice
+
+@app.post("/api/v1/notices/ai-template")
+def get_ai_template(notice_type: str, db: Session = Depends(get_db)):
+    templates = {
+        "urgent": {
+            "title": "[긴급] 층간소음 주의 안내",
+            "content": "관리사무소입니다. 최근 층간소음 민원이 증가하고 있습니다. 야간 시간대(22시~07시) 소음에 각별히 주의해 주시기 바랍니다."
+        },
+        "general": {
+            "title": "[공지] 층간소음 예절 안내",
+            "content": "관리사무소입니다. 쾌적한 주거환경을 위해 층간소음 예절을 지켜주시기 바랍니다."
+        },
+        "manner": {
+            "title": "[생활매너] 발소리 줄이기 안내",
+            "content": "층간소음을 예방하기 위해 실내에서 슬리퍼 착용 및 뛰는 행동을 자제해 주시기 바랍니다."
+        },
+        "equipment": {
+            "title": "[장비점검] IoT 센서 점검 안내",
+            "content": "층간소음 측정 센서 정기 점검이 예정되어 있습니다. 일시 및 세대 안내는 별도 공지 부탁드립니다."
+        }
+    }
+    template = templates.get(notice_type, templates["general"])
+    return {"template": template}

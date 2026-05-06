@@ -83,3 +83,18 @@ class Mediation(Base):
     tone_check_json = Column(Text, nullable=True)    # 신규
     status = Column(String, default="pending")
     created_at = Column(DateTime, server_default=func.now())
+
+# 공지사항 테이블
+class Notice(Base):
+    __tablename__ = "notices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String)                    # 공지 제목
+    content = Column(Text)                    # 공지 내용
+    notice_type = Column(String)              # urgent, general, manner, equipment
+    target_type = Column(String)              # all, specific
+    target_households = Column(Text, nullable=True)  # 특정 세대 목록 JSON
+    status = Column(String, default="draft")  # draft, sent, scheduled
+    created_by = Column(Integer, nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
