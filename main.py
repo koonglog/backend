@@ -8,6 +8,15 @@ from typing import List, Optional
 import models
 from database import engine, get_db
 
+import os
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv()
+load_dotenv(dotenv_path="/Users/ijiho/backend/.env")
+ENABLE_OPENAI = os.getenv("ENABLE_OPENAI", "false").lower() == "true"
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if ENABLE_OPENAI else None
+
 # DB 테이블 생성
 models.Base.metadata.create_all(bind=engine)
 
@@ -107,8 +116,7 @@ def classify_event(sound_level: float, vibration_value: float = None, duration_m
         "confidence": 0.85
     }
 
-def generate_ai_message(unit: str, sound_level: float, event_type: str, is_night: bool, generation_method: str = "template") -> dict:
-    """비폭력 표현 기반 중재 메시지 생성"""
+def generate_ai_message(unit: str, sound_level: float, event_type: str, is_night: bool) -> dict:
     time_label = "야간 시간대" if is_night else "해당 시간대"
     type_label = {
         "impact_noise": "충격음",
@@ -117,13 +125,43 @@ def generate_ai_message(unit: str, sound_level: float, event_type: str, is_night
         "repeated_vibration": "반복 진동음"
     }.get(event_type, "소음")
 
-    event_summary = f"{sound_level}dB의 {type_label}이 감지되었습니다."
+    # 템플릿 기반 fallback 메시지
     resident_message = (
         f"{time_label}에 {type_label}이 감지되었습니다. "
         f"혹시 해당 시간대에 바닥 충격이 발생할 수 있는 활동이 있었는지 확인 부탁드립니다."
     )
+    event_summary = f"{sound_level}dB의 {type_label}이 감지되었습니다."
     admin_summary = f"[{unit}] {sound_level}dB {type_label} 감지. {'야간 발생으로 주의 필요.' if is_night else ''}"
     recommended_action = "quiet_time_request" if is_night else "notice"
+    generation_method = "template"
+
+    # OpenAI 호출 (ENABLE_OPENAI=true일 때만)
+    if ENABLE_OPENAI and client:
+        try:
+            prompt = f"""
+층간소음 중재 메시지를 작성해주세요. 감정 없이 중립적으로 작성하세요.
+
+상황:
+- 세대: {unit}
+- 소음 유형: {type_label}
+- 소음 강도: {sound_level}dB
+- 야간 여부: {"야간" if is_night else "주간"}
+
+다음 형식으로 작성하세요:
+- 주민용 메시지: (부드럽고 중립적인 안내문)
+- 관리자 요약: (간단한 상황 요약)
+"""
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=300
+            )
+            content = response.choices[0].message.content
+            resident_message = content
+            generation_method = "llm"
+        except Exception as e:
+            print(f"⚠️ OpenAI 호출 실패, fallback 사용: {e}")
+            generation_method = "template"
 
     return {
         "ai_message": resident_message,
