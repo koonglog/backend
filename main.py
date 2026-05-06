@@ -845,3 +845,56 @@ def calibrate_sensor(sensor_id: str, data: CalibrationUpdate, db: Session = Depe
     db.commit()
     db.refresh(sensor)
     return {"status": "success", "sensor_id": sensor_id, "calibration_offset": sensor.calibration_offset}
+
+# --- 관리자 업무 설정 ---
+
+class AdminSettingsResponse(BaseModel):
+    id: int
+    admin_id: int
+    noise_threshold: float
+    duration_threshold: int
+    off_hours_mute: bool
+    work_start_time: Optional[str] = None
+    work_end_time: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class AdminSettingsUpdate(BaseModel):
+    noise_threshold: Optional[float] = None
+    duration_threshold: Optional[int] = None
+    off_hours_mute: Optional[bool] = None
+    work_start_time: Optional[str] = None
+    work_end_time: Optional[str] = None
+
+@app.get("/api/v1/admin/settings/{admin_id}", response_model=AdminSettingsResponse)
+def get_admin_settings(admin_id: int, db: Session = Depends(get_db)):
+    settings = db.query(models.AdminSettings).filter(models.AdminSettings.admin_id == admin_id).first()
+    if not settings:
+        # 없으면 기본값으로 생성
+        settings = models.AdminSettings(admin_id=admin_id)
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+@app.patch("/api/v1/admin/settings/{admin_id}", response_model=AdminSettingsResponse)
+def update_admin_settings(admin_id: int, data: AdminSettingsUpdate, db: Session = Depends(get_db)):
+    settings = db.query(models.AdminSettings).filter(models.AdminSettings.admin_id == admin_id).first()
+    if not settings:
+        settings = models.AdminSettings(admin_id=admin_id)
+        db.add(settings)
+        db.flush()
+    if data.noise_threshold is not None:
+        settings.noise_threshold = data.noise_threshold
+    if data.duration_threshold is not None:
+        settings.duration_threshold = data.duration_threshold
+    if data.off_hours_mute is not None:
+        settings.off_hours_mute = data.off_hours_mute
+    if data.work_start_time is not None:
+        settings.work_start_time = data.work_start_time
+    if data.work_end_time is not None:
+        settings.work_end_time = data.work_end_time
+    db.commit()
+    db.refresh(settings)
+    return settings
