@@ -845,3 +845,149 @@ def calibrate_sensor(sensor_id: str, data: CalibrationUpdate, db: Session = Depe
     db.commit()
     db.refresh(sensor)
     return {"status": "success", "sensor_id": sensor_id, "calibration_offset": sensor.calibration_offset}
+
+# --- 관리자 업무 설정 ---
+
+class AdminSettingsResponse(BaseModel):
+    id: int
+    admin_id: int
+    noise_threshold: float
+    duration_threshold: int
+    off_hours_mute: bool
+    work_start_time: Optional[str] = None
+    work_end_time: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class AdminSettingsUpdate(BaseModel):
+    noise_threshold: Optional[float] = None
+    duration_threshold: Optional[int] = None
+    off_hours_mute: Optional[bool] = None
+    work_start_time: Optional[str] = None
+    work_end_time: Optional[str] = None
+
+@app.get("/api/v1/admin/settings/{admin_id}", response_model=AdminSettingsResponse)
+def get_admin_settings(admin_id: int, db: Session = Depends(get_db)):
+    settings = db.query(models.AdminSettings).filter(models.AdminSettings.admin_id == admin_id).first()
+    if not settings:
+        # 없으면 기본값으로 생성
+        settings = models.AdminSettings(admin_id=admin_id)
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+@app.patch("/api/v1/admin/settings/{admin_id}", response_model=AdminSettingsResponse)
+def update_admin_settings(admin_id: int, data: AdminSettingsUpdate, db: Session = Depends(get_db)):
+    settings = db.query(models.AdminSettings).filter(models.AdminSettings.admin_id == admin_id).first()
+    if not settings:
+        settings = models.AdminSettings(admin_id=admin_id)
+        db.add(settings)
+        db.flush()
+    if data.noise_threshold is not None:
+        settings.noise_threshold = data.noise_threshold
+    if data.duration_threshold is not None:
+        settings.duration_threshold = data.duration_threshold
+    if data.off_hours_mute is not None:
+        settings.off_hours_mute = data.off_hours_mute
+    if data.work_start_time is not None:
+        settings.work_start_time = data.work_start_time
+    if data.work_end_time is not None:
+        settings.work_end_time = data.work_end_time
+    db.commit()
+    db.refresh(settings)
+    return settings
+
+
+# --- 소음 분포도 ---
+
+@app.get("/api/v1/noise/distribution")
+def get_noise_distribution(building: Optional[str] = None, db: Session = Depends(get_db)):
+    households = db.query(models.Household).all()
+
+    result = []
+    for household in households:
+        if building and household.building_name != building:
+            continue
+
+        logs = db.query(models.NoiseLog).filter(
+            models.NoiseLog.household_id == household.id
+        ).all()
+
+        total_count = len(logs)
+        high_count = sum(1 for l in logs if l.severity == "high")
+
+        # 위험도 판단
+        if total_count >= 7 or high_count >= 3:
+            risk_level = "urgent"
+            risk_label = "긴급 대응 필요"
+        elif total_count >= 3:
+            risk_level = "caution"
+            risk_label = "관찰 필요"
+        else:
+            risk_level = "normal"
+            risk_label = "정상"
+
+        result.append({
+            "household_id": household.id,
+            "building_name": household.building_name,
+            "unit_number": household.unit_number,
+            "floor": household.floor,
+            "alias": household.alias,
+            "total_count": total_count,
+            "high_count": high_count,
+            "risk_level": risk_level,
+            "risk_label": risk_label
+        })
+
+    # 건물별로 그룹핑
+    buildings = {}
+    for item in result:
+        bname = item["building_name"]
+        if bname not in buildings:
+            buildings[bname] = []
+        buildings[bname].append(item)
+
+    return {
+        "buildings": buildings,
+        "legend": {
+            "urgent": "긴급 대응 필요 (7건 이상 또는 고강도 3건 이상)",
+            "caution": "관찰 필요 (3~6건)",
+            "normal": "정상 (2건 이하)"
+        }
+    }
+
+
+@app.get("/api/v1/noise/distribution/export")
+def export_noise_distribution(db: Session = Depends(get_db)):
+    households = db.query(models.Household).all()
+
+    rows = []
+    for household in households:
+        logs = db.query(models.NoiseLog).filter(
+            models.NoiseLog.household_id == household.id
+        ).all()
+
+        total_count = len(logs)
+        high_count = sum(1 for l in logs if l.severity == "high")
+        night_count = sum(1 for l in logs if l.is_night)
+
+        if total_count >= 7 or high_count >= 3:
+            risk_level = "긴급 대응 필요"
+        elif total_count >= 3:
+            risk_level = "관찰 필요"
+        else:
+            risk_level = "정상"
+
+        rows.append({
+            "세대": household.alias,
+            "건물": household.building_name,
+            "호수": household.unit_number,
+            "총 이벤트": total_count,
+            "고강도 이벤트": high_count,
+            "야간 이벤트": night_count,
+            "위험도": risk_level
+        })
+
+    return {"data": rows, "total": len(rows)}

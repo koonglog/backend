@@ -110,6 +110,30 @@ class Mediation(Base):
     status = Column(String, default="대기")
     created_at = Column(DateTime, server_default=func.now())
 
-    # 관계 설정
-    noise_log = relationship("NoiseLog", back_populates="mediation")
-    household = relationship("Household", back_populates="mediations")
+# 공지사항 테이블
+class Notice(Base):
+    __tablename__ = "notices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String)                    # 공지 제목
+    content = Column(Text)                    # 공지 내용
+    notice_type = Column(String)              # urgent, general, manner, equipment
+    target_type = Column(String)              # all, specific
+    target_households = Column(Text, nullable=True)  # 특정 세대 목록 JSON
+    status = Column(String, default="draft")  # draft, sent, scheduled
+    created_by = Column(Integer, nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+# 관리자 업무 설정 테이블
+class AdminSettings(Base):
+    __tablename__ = "admin_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    admin_id = Column(Integer, ForeignKey("admins.id"))
+    noise_threshold = Column(Float, default=40.0)    # 긴급 알람 임계값 (dB)
+    duration_threshold = Column(Integer, default=10)  # 지속 시간 (초)
+    off_hours_mute = Column(Boolean, default=False)   # 업무 시간외 알람 차단
+    work_start_time = Column(String, nullable=True)   # 근무 시작 시간
+    work_end_time = Column(String, nullable=True)     # 근무 종료 시간
+    updated_at = Column(DateTime, server_default=func.now())
