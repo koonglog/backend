@@ -390,9 +390,10 @@ def get_admin_cases(db: Session = Depends(get_db)):
 class NoticeCreate(BaseModel):
     title: str
     content: str
-    notice_type: str  # urgent, general, manner, equipment
-    target_type: str  # all, specific
+    notice_type: str
+    target_type: str
     target_households: Optional[list] = None
+    scheduled_at: Optional[datetime] = None  # 예약 발송 시간 추가
 
 class NoticeResponse(BaseModel):
     id: int
@@ -409,19 +410,27 @@ class NoticeResponse(BaseModel):
 
 @app.post("/api/v1/notices")
 def create_notice(data: NoticeCreate, db: Session = Depends(get_db)):
+    # 예약 발송이면 scheduled, 아니면 바로 sent
+    if data.scheduled_at:
+        status = "scheduled"
+        sent_at = data.scheduled_at
+    else:
+        status = "sent"
+        sent_at = datetime.now()
+
     new_notice = models.Notice(
         title=data.title,
         content=data.content,
         notice_type=data.notice_type,
         target_type=data.target_type,
         target_households=json.dumps(data.target_households) if data.target_households else None,
-        status="sent",
-        sent_at=datetime.now()
+        status=status,
+        sent_at=sent_at
     )
     db.add(new_notice)
     db.commit()
     db.refresh(new_notice)
-    return {"status": "success", "notice_id": new_notice.id}
+    return {"status": "success", "notice_id": new_notice.id, "scheduled_at": data.scheduled_at}
 
 @app.get("/api/v1/notices", response_model=List[NoticeResponse])
 def get_notices(notice_type: Optional[str] = None, db: Session = Depends(get_db)):
