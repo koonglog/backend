@@ -390,9 +390,10 @@ def get_admin_cases(db: Session = Depends(get_db)):
 class NoticeCreate(BaseModel):
     title: str
     content: str
-    notice_type: str  # urgent, general, manner, equipment
-    target_type: str  # all, specific
+    notice_type: str
+    target_type: str
     target_households: Optional[list] = None
+    scheduled_at: Optional[datetime] = None  # 예약 발송 시간 추가
 
 class NoticeResponse(BaseModel):
     id: int
@@ -409,19 +410,27 @@ class NoticeResponse(BaseModel):
 
 @app.post("/api/v1/notices")
 def create_notice(data: NoticeCreate, db: Session = Depends(get_db)):
+    # 예약 발송이면 scheduled, 아니면 바로 sent
+    if data.scheduled_at:
+        status = "scheduled"
+        sent_at = data.scheduled_at
+    else:
+        status = "sent"
+        sent_at = datetime.now()
+
     new_notice = models.Notice(
         title=data.title,
         content=data.content,
         notice_type=data.notice_type,
         target_type=data.target_type,
         target_households=json.dumps(data.target_households) if data.target_households else None,
-        status="sent",
-        sent_at=datetime.now()
+        status=status,
+        sent_at=sent_at
     )
     db.add(new_notice)
     db.commit()
     db.refresh(new_notice)
-    return {"status": "success", "notice_id": new_notice.id}
+    return {"status": "success", "notice_id": new_notice.id, "scheduled_at": data.scheduled_at}
 
 @app.get("/api/v1/notices", response_model=List[NoticeResponse])
 def get_notices(notice_type: Optional[str] = None, db: Session = Depends(get_db)):
@@ -607,3 +616,140 @@ def get_custom_report(
             } for l in logs
         ]
     }
+
+# --- PDF 다운로드 ---
+from fastapi.responses import StreamingResponse
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+import io
+
+def create_pdf_report(title: str, data: dict) -> bytes:
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+
+    # 제목
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(50, height - 50, title)
+
+    # 날짜
+    c.setFont("Helvetica", 10)
+    c.drawString(50, height - 70, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+    y = height - 110
+
+    # 요약 정보
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(50, y, "Summary")
+    y -= 20
+
+    c.setFont("Helvetica", 10)
+    for key, value in data.get("summary", {}).items():
+        c.drawString(60, y, f"{key}: {value}")
+        y -= 15
+
+    y -= 10
+
+    # 로그 목록
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(50, y, "Noise Logs")
+    y -= 20
+
+    c.setFont("Helvetica", 9)
+    for log in data.get("logs", [])[:30]:  # 최대 30개
+        line = f"ID:{log['id']} | {log.get('timestamp', '')} | {log.get('event_type', '')} | {log.get('severity', '')} | {log.get('sound_level', '')}dB"
+        c.drawString(60, y, line)
+        y -= 13
+        if y < 50:
+            c.showPage()
+            y = height - 50
+
+    c.save()
+    buffer.seek(0)
+    return buffer.getvalue()
+
+@app.get("/api/v1/reports/household/{household_id}/pdf")
+def download_household_pdf(household_id: int, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(models.Household.id == household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+
+    logs = db.query(models.NoiseLog).filter(models.NoiseLog.household_id == household_id).all()
+    total_count = len(logs)
+    night_count = sum(1 for l in logs if l.is_night)
+    high_count = sum(1 for l in logs if l.severity == "high")
+    avg_sound = round(sum(l.sound_level for l in logs) / total_count, 1) if total_count > 0 else 0
+
+    data = {
+        "summary": {
+            "household": f"{household.building_name} {household.unit_number}",
+            "total_count": total_count,
+            "night_count": night_count,
+            "high_count": high_count,
+            "avg_sound_level": avg_sound
+        },
+        "logs": [
+            {
+                "id": l.id,
+                "sound_level": l.sound_level,
+                "event_type": l.event_type,
+                "severity": l.severity,
+                "is_night": l.is_night,
+                "timestamp": str(l.timestamp)
+            } for l in logs
+        ]
+    }
+
+    pdf_bytes = create_pdf_report(f"Household Report - {household.alias}", data)
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=report_{household.alias}.pdf"}
+    )
+
+@app.get("/api/v1/reports/monthly/pdf")
+def download_monthly_pdf(year: int, month: int, db: Session = Depends(get_db)):
+    import calendar
+    start = datetime(year, month, 1)
+    end = datetime(year, month, calendar.monthrange(year, month)[1], 23, 59, 59)
+
+    logs = db.query(models.NoiseLog).filter(
+        models.NoiseLog.timestamp >= start,
+        models.NoiseLog.timestamp <= end
+    ).all()
+
+    total_count = len(logs)
+    night_count = sum(1 for l in logs if l.is_night)
+    high_count = sum(1 for l in logs if l.severity == "high")
+    avg_sound = round(sum(l.sound_level for l in logs) / total_count, 1) if total_count > 0 else 0
+
+    data = {
+        "summary": {
+            "period": f"{year}-{month:02d}",
+            "total_count": total_count,
+            "night_count": night_count,
+            "high_count": high_count,
+            "avg_sound_level": avg_sound
+        },
+        "logs": [
+            {
+                "id": l.id,
+                "sound_level": l.sound_level,
+                "event_type": l.event_type,
+                "severity": l.severity,
+                "is_night": l.is_night,
+                "timestamp": str(l.timestamp)
+            } for l in logs
+        ]
+    }
+
+    pdf_bytes = create_pdf_report(f"Monthly Report - {year}.{month:02d}", data)
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename=monthly_report_{year}_{month:02d}.pdf"}
+    )
