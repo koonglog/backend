@@ -77,7 +77,9 @@ class MediationResponse(BaseModel):
         from_attributes = True
 
 class MediationUpdate(BaseModel):
-    status: str
+    status: Optional[str] = None
+    ai_message: Optional[str] = None
+    resident_message: Optional[str] = None
 
 # --- AI 로직 ---
 
@@ -344,12 +346,24 @@ def get_mediations(status: Optional[str] = None, db: Session = Depends(get_db)):
         query = query.filter(models.Mediation.status == status)
     return query.all()
 
+@app.get("/api/v1/mediations/{med_id}", response_model=MediationResponse)
+def get_mediation(med_id: int, db: Session = Depends(get_db)):
+    med = db.query(models.Mediation).filter(models.Mediation.id == med_id).first()
+    if not med:
+        raise HTTPException(status_code=404, detail="해당 중재 정보를 찾을 수 없습니다.")
+    return med
+
 @app.patch("/api/v1/mediations/{med_id}", response_model=MediationResponse)
 def update_mediation_status(med_id: int, data: MediationUpdate, db: Session = Depends(get_db)):
     med = db.query(models.Mediation).filter(models.Mediation.id == med_id).first()
     if not med:
         raise HTTPException(status_code=404, detail="해당 중재 정보를 찾을 수 없습니다.")
-    med.status = data.status
+    if data.status:
+        med.status = data.status
+    if data.ai_message:
+        med.ai_message = data.ai_message
+    if data.resident_message:
+        med.resident_message = data.resident_message
     db.commit()
     db.refresh(med)
     return med
