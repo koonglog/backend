@@ -137,3 +137,4 @@ class AdminSettings(Base):
     work_start_time = Column(String, nullable=True)   # 근무 시작 시간
     work_end_time = Column(String, nullable=True)     # 근무 종료 시간
     updated_at = Column(DateTime, server_default=func.now())
+
