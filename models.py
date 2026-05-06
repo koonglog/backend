@@ -81,5 +81,5 @@ class Mediation(Base):
     recommended_action = Column(String, nullable=True)  # 신규
     generation_method = Column(String, nullable=True)   # 신규: template, llm
     tone_check_json = Column(Text, nullable=True)    # 신규
-    status = Column(String, default="대기")
+    status = Column(String, default="pending")
     created_at = Column(DateTime, server_default=func.now())

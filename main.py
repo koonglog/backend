@@ -282,7 +282,7 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
             recommended_action=msg["recommended_action"],
             generation_method=msg["generation_method"],
             tone_check_json=json.dumps(msg["tone_check"], ensure_ascii=False),
-            status="대기"
+            status="pending"
         )
         db.add(new_med)
         message_created = True
@@ -338,8 +338,11 @@ def get_household_patterns(household_id: int, db: Session = Depends(get_db)):
     return pattern_result
 
 @app.get("/api/v1/mediations", response_model=List[MediationResponse])
-def get_mediations(db: Session = Depends(get_db)):
-    return db.query(models.Mediation).order_by(models.Mediation.created_at.desc()).all()
+def get_mediations(status: Optional[str] = None, db: Session = Depends(get_db)):
+    query = db.query(models.Mediation).order_by(models.Mediation.created_at.desc())
+    if status:
+        query = query.filter(models.Mediation.status == status)
+    return query.all()
 
 @app.patch("/api/v1/mediations/{med_id}", response_model=MediationResponse)
 def update_mediation_status(med_id: int, data: MediationUpdate, db: Session = Depends(get_db)):
