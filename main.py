@@ -2,8 +2,9 @@ from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pydantic import BaseModel
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import List, Optional
+import json
 
 import models
 from database import engine, get_db
@@ -47,9 +48,9 @@ app = FastAPI(title="쿵로그(KungLog) AI 통합 서버")
 
 class NoiseData(BaseModel):
     sensor_id: str
-    sound_level: float           # decibel → sound_level 통일
-    vibration_value: Optional[float] = None
-    duration_ms: Optional[int] = None
+    sound_level: float
+    vibration_value: float        # 필수로 변경
+    duration_ms: int              # 필수로 변경
     timestamp: datetime
     acceleration: Optional[dict] = None
 
@@ -81,7 +82,6 @@ class MediationUpdate(BaseModel):
 # --- AI 로직 ---
 
 def classify_event(sound_level: float, vibration_value: float = None, duration_ms: int = None, timestamp: datetime = None) -> dict:
-    """이벤트 분류 및 심각도 산정"""
     event_type = "background_noise"
     severity = "low"
     severity_score = 0.0
@@ -116,6 +116,28 @@ def classify_event(sound_level: float, vibration_value: float = None, duration_m
         "confidence": 0.85
     }
 
+def analyze_patterns(household_id: int, db: Session) -> dict:
+    """최근 7일 패턴 분석"""
+    seven_days_ago = datetime.now() - timedelta(days=7)
+    logs = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id,
+        models.NoiseLog.timestamp >= seven_days_ago
+    ).all()
+
+    total_count = len(logs)
+    night_count = sum(1 for l in logs if l.is_night)
+    high_count = sum(1 for l in logs if l.severity == "high")
+
+    needs_mediation = night_count >= 3 or high_count >= 5 or total_count >= 15
+
+    return {
+        "total_count": total_count,
+        "night_count": night_count,
+        "high_count": high_count,
+        "needs_mediation": needs_mediation,
+        "period_days": 7
+    }
+
 def generate_ai_message(unit: str, sound_level: float, event_type: str, is_night: bool) -> dict:
     time_label = "야간 시간대" if is_night else "해당 시간대"
     type_label = {
@@ -125,7 +147,6 @@ def generate_ai_message(unit: str, sound_level: float, event_type: str, is_night
         "repeated_vibration": "반복 진동음"
     }.get(event_type, "소음")
 
-    # 템플릿 기반 fallback 메시지
     resident_message = (
         f"{time_label}에 {type_label}이 감지되었습니다. "
         f"혹시 해당 시간대에 바닥 충격이 발생할 수 있는 활동이 있었는지 확인 부탁드립니다."
@@ -135,7 +156,8 @@ def generate_ai_message(unit: str, sound_level: float, event_type: str, is_night
     recommended_action = "quiet_time_request" if is_night else "notice"
     generation_method = "template"
 
-    # OpenAI 호출 (ENABLE_OPENAI=true일 때만)
+    tone_check = {"checked": True, "tone": "neutral", "is_violent": False}
+
     if ENABLE_OPENAI and client:
         try:
             prompt = f"""
@@ -169,7 +191,8 @@ def generate_ai_message(unit: str, sound_level: float, event_type: str, is_night
         "resident_message": resident_message,
         "admin_summary": admin_summary,
         "recommended_action": recommended_action,
-        "generation_method": generation_method
+        "generation_method": generation_method,
+        "tone_check": tone_check
     }
 
 # --- API 엔드포인트 ---
@@ -204,11 +227,11 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
 
 @app.post("/api/v1/sensor-readings")
 async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
-    """Arduino/시뮬레이터 데이터 수신 - 메인 엔드포인트"""
     sensor = db.query(models.Sensor).filter(models.Sensor.sensor_id == data.sensor_id).first()
     if not sensor:
         raise HTTPException(status_code=404, detail=f"sensor_id '{data.sensor_id}' 를 찾을 수 없습니다.")
 
+    # 1. classify_event
     classification = classify_event(
         sound_level=data.sound_level,
         vibration_value=data.vibration_value,
@@ -233,10 +256,14 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
     db.add(new_log)
     db.flush()
 
+    # 2. analyze_patterns
+    pattern_result = analyze_patterns(sensor.household_id, db)
+
     message_created = False
     ai_result = None
 
-    if classification["severity"] in ["medium", "high"]:
+    # 3. generate_mediation_message (severity >= medium 또는 needs_mediation)
+    if classification["severity"] in ["medium", "high"] or pattern_result["needs_mediation"]:
         unit = sensor.location_unit
         msg = generate_ai_message(
             unit=unit,
@@ -254,6 +281,7 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
             admin_summary=msg["admin_summary"],
             recommended_action=msg["recommended_action"],
             generation_method=msg["generation_method"],
+            tone_check_json=json.dumps(msg["tone_check"], ensure_ascii=False),
             status="대기"
         )
         db.add(new_med)
@@ -270,6 +298,7 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
             "severity": classification["severity"],
             "is_night": classification["is_night"]
         },
+        "pattern_result": pattern_result,
         "message_created": message_created,
         "ai_result": ai_result
     }
@@ -303,6 +332,11 @@ def get_recent_noise_logs(since: Optional[datetime] = None, db: Session = Depend
     logs = query.limit(20).all()
     return {"logs": logs}
 
+@app.get("/api/v1/households/{household_id}/patterns")
+def get_household_patterns(household_id: int, db: Session = Depends(get_db)):
+    pattern_result = analyze_patterns(household_id, db)
+    return pattern_result
+
 @app.get("/api/v1/mediations", response_model=List[MediationResponse])
 def get_mediations(db: Session = Depends(get_db)):
     return db.query(models.Mediation).order_by(models.Mediation.created_at.desc()).all()
@@ -316,3 +350,20 @@ def update_mediation_status(med_id: int, data: MediationUpdate, db: Session = De
     db.commit()
     db.refresh(med)
     return med
+
+@app.get("/api/v1/admin/cases")
+def get_admin_cases(db: Session = Depends(get_db)):
+    mediations = db.query(models.Mediation).order_by(models.Mediation.created_at.desc()).all()
+    return {"cases": [
+        {
+            "id": m.id,
+            "target_unit": m.target_unit,
+            "ai_message": m.ai_message,
+            "event_summary": m.event_summary,
+            "admin_summary": m.admin_summary,
+            "recommended_action": m.recommended_action,
+            "generation_method": m.generation_method,
+            "status": m.status,
+            "created_at": m.created_at
+        } for m in mediations
+    ]}
