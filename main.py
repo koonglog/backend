@@ -459,3 +459,151 @@ def get_ai_template(notice_type: str, db: Session = Depends(get_db)):
     }
     template = templates.get(notice_type, templates["general"])
     return {"template": template}
+
+# --- 리포트 ---
+
+@app.get("/api/v1/reports/household/{household_id}")
+def get_household_report(household_id: int, start_date: Optional[str] = None, end_date: Optional[str] = None, db: Session = Depends(get_db)):
+    """세대별 종합 리포트"""
+    household = db.query(models.Household).filter(models.Household.id == household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+
+    query = db.query(models.NoiseLog).filter(models.NoiseLog.household_id == household_id)
+
+    if start_date:
+        query = query.filter(models.NoiseLog.timestamp >= datetime.fromisoformat(start_date))
+    if end_date:
+        query = query.filter(models.NoiseLog.timestamp <= datetime.fromisoformat(end_date))
+
+    logs = query.all()
+
+    total_count = len(logs)
+    night_count = sum(1 for l in logs if l.is_night)
+    high_count = sum(1 for l in logs if l.severity == "high")
+    avg_sound = round(sum(l.sound_level for l in logs) / total_count, 1) if total_count > 0 else 0
+
+    event_types = {}
+    for log in logs:
+        event_types[log.event_type] = event_types.get(log.event_type, 0) + 1
+
+    return {
+        "household": {
+            "id": household.id,
+            "building_name": household.building_name,
+            "unit_number": household.unit_number,
+            "alias": household.alias
+        },
+        "period": {
+            "start_date": start_date,
+            "end_date": end_date
+        },
+        "summary": {
+            "total_count": total_count,
+            "night_count": night_count,
+            "high_count": high_count,
+            "avg_sound_level": avg_sound,
+            "event_types": event_types
+        },
+        "logs": [
+            {
+                "id": l.id,
+                "sound_level": l.sound_level,
+                "event_type": l.event_type,
+                "severity": l.severity,
+                "is_night": l.is_night,
+                "timestamp": l.timestamp
+            } for l in logs
+        ]
+    }
+
+@app.get("/api/v1/reports/monthly")
+def get_monthly_report(year: int, month: int, db: Session = Depends(get_db)):
+    """전체 동 월간 통계"""
+    from datetime import date
+    import calendar
+
+    start = datetime(year, month, 1)
+    end = datetime(year, month, calendar.monthrange(year, month)[1], 23, 59, 59)
+
+    logs = db.query(models.NoiseLog).filter(
+        models.NoiseLog.timestamp >= start,
+        models.NoiseLog.timestamp <= end
+    ).all()
+
+    total_count = len(logs)
+    night_count = sum(1 for l in logs if l.is_night)
+    high_count = sum(1 for l in logs if l.severity == "high")
+
+    household_stats = {}
+    for log in logs:
+        hid = log.household_id
+        if hid not in household_stats:
+            household_stats[hid] = {"count": 0, "night_count": 0, "high_count": 0}
+        household_stats[hid]["count"] += 1
+        if log.is_night:
+            household_stats[hid]["night_count"] += 1
+        if log.severity == "high":
+            household_stats[hid]["high_count"] += 1
+
+    return {
+        "period": {"year": year, "month": month},
+        "summary": {
+            "total_count": total_count,
+            "night_count": night_count,
+            "high_count": high_count
+        },
+        "household_stats": household_stats
+    }
+
+@app.get("/api/v1/reports/custom")
+def get_custom_report(
+    household_id: Optional[int] = None,
+    event_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """커스텀 리포트"""
+    query = db.query(models.NoiseLog)
+
+    if household_id:
+        query = query.filter(models.NoiseLog.household_id == household_id)
+    if event_type:
+        query = query.filter(models.NoiseLog.event_type == event_type)
+    if severity:
+        query = query.filter(models.NoiseLog.severity == severity)
+    if start_date:
+        query = query.filter(models.NoiseLog.timestamp >= datetime.fromisoformat(start_date))
+    if end_date:
+        query = query.filter(models.NoiseLog.timestamp <= datetime.fromisoformat(end_date))
+
+    logs = query.order_by(models.NoiseLog.timestamp.desc()).all()
+    total_count = len(logs)
+    avg_sound = round(sum(l.sound_level for l in logs) / total_count, 1) if total_count > 0 else 0
+
+    return {
+        "filters": {
+            "household_id": household_id,
+            "event_type": event_type,
+            "severity": severity,
+            "start_date": start_date,
+            "end_date": end_date
+        },
+        "summary": {
+            "total_count": total_count,
+            "avg_sound_level": avg_sound
+        },
+        "logs": [
+            {
+                "id": l.id,
+                "household_id": l.household_id,
+                "sound_level": l.sound_level,
+                "event_type": l.event_type,
+                "severity": l.severity,
+                "is_night": l.is_night,
+                "timestamp": l.timestamp
+            } for l in logs
+        ]
+    }
