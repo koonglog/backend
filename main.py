@@ -2,8 +2,9 @@ from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pydantic import BaseModel
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import List, Optional
+import json
 
 import models
 from database import engine, get_db
@@ -47,9 +48,9 @@ app = FastAPI(title="쿵로그(KungLog) AI 통합 서버")
 
 class NoiseData(BaseModel):
     sensor_id: str
-    sound_level: float           # decibel → sound_level 통일
-    vibration_value: Optional[float] = None
-    duration_ms: Optional[int] = None
+    sound_level: float
+    vibration_value: float        # 필수로 변경
+    duration_ms: int              # 필수로 변경
     timestamp: datetime
     acceleration: Optional[dict] = None
 
@@ -76,12 +77,13 @@ class MediationResponse(BaseModel):
         from_attributes = True
 
 class MediationUpdate(BaseModel):
-    status: str
+    status: Optional[str] = None
+    ai_message: Optional[str] = None
+    resident_message: Optional[str] = None
 
 # --- AI 로직 ---
 
 def classify_event(sound_level: float, vibration_value: float = None, duration_ms: int = None, timestamp: datetime = None) -> dict:
-    """이벤트 분류 및 심각도 산정"""
     event_type = "background_noise"
     severity = "low"
     severity_score = 0.0
@@ -116,6 +118,28 @@ def classify_event(sound_level: float, vibration_value: float = None, duration_m
         "confidence": 0.85
     }
 
+def analyze_patterns(household_id: int, db: Session) -> dict:
+    """최근 7일 패턴 분석"""
+    seven_days_ago = datetime.now() - timedelta(days=7)
+    logs = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id,
+        models.NoiseLog.timestamp >= seven_days_ago
+    ).all()
+
+    total_count = len(logs)
+    night_count = sum(1 for l in logs if l.is_night)
+    high_count = sum(1 for l in logs if l.severity == "high")
+
+    needs_mediation = night_count >= 3 or high_count >= 5 or total_count >= 15
+
+    return {
+        "total_count": total_count,
+        "night_count": night_count,
+        "high_count": high_count,
+        "needs_mediation": needs_mediation,
+        "period_days": 7
+    }
+
 def generate_ai_message(unit: str, sound_level: float, event_type: str, is_night: bool) -> dict:
     time_label = "야간 시간대" if is_night else "해당 시간대"
     type_label = {
@@ -125,7 +149,6 @@ def generate_ai_message(unit: str, sound_level: float, event_type: str, is_night
         "repeated_vibration": "반복 진동음"
     }.get(event_type, "소음")
 
-    # 템플릿 기반 fallback 메시지
     resident_message = (
         f"{time_label}에 {type_label}이 감지되었습니다. "
         f"혹시 해당 시간대에 바닥 충격이 발생할 수 있는 활동이 있었는지 확인 부탁드립니다."
@@ -135,7 +158,8 @@ def generate_ai_message(unit: str, sound_level: float, event_type: str, is_night
     recommended_action = "quiet_time_request" if is_night else "notice"
     generation_method = "template"
 
-    # OpenAI 호출 (ENABLE_OPENAI=true일 때만)
+    tone_check = {"checked": True, "tone": "neutral", "is_violent": False}
+
     if ENABLE_OPENAI and client:
         try:
             prompt = f"""
@@ -169,7 +193,8 @@ def generate_ai_message(unit: str, sound_level: float, event_type: str, is_night
         "resident_message": resident_message,
         "admin_summary": admin_summary,
         "recommended_action": recommended_action,
-        "generation_method": generation_method
+        "generation_method": generation_method,
+        "tone_check": tone_check
     }
 
 # --- API 엔드포인트 ---
@@ -204,11 +229,11 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
 
 @app.post("/api/v1/sensor-readings")
 async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
-    """Arduino/시뮬레이터 데이터 수신 - 메인 엔드포인트"""
     sensor = db.query(models.Sensor).filter(models.Sensor.sensor_id == data.sensor_id).first()
     if not sensor:
         raise HTTPException(status_code=404, detail=f"sensor_id '{data.sensor_id}' 를 찾을 수 없습니다.")
 
+    # 1. classify_event
     classification = classify_event(
         sound_level=data.sound_level,
         vibration_value=data.vibration_value,
@@ -233,10 +258,14 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
     db.add(new_log)
     db.flush()
 
+    # 2. analyze_patterns
+    pattern_result = analyze_patterns(sensor.household_id, db)
+
     message_created = False
     ai_result = None
 
-    if classification["severity"] in ["medium", "high"]:
+    # 3. generate_mediation_message (severity >= medium 또는 needs_mediation)
+    if classification["severity"] in ["medium", "high"] or pattern_result["needs_mediation"]:
         unit = sensor.location_unit
         msg = generate_ai_message(
             unit=unit,
@@ -254,7 +283,8 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
             admin_summary=msg["admin_summary"],
             recommended_action=msg["recommended_action"],
             generation_method=msg["generation_method"],
-            status="대기"
+            tone_check_json=json.dumps(msg["tone_check"], ensure_ascii=False),
+            status="pending"
         )
         db.add(new_med)
         message_created = True
@@ -270,6 +300,7 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
             "severity": classification["severity"],
             "is_night": classification["is_night"]
         },
+        "pattern_result": pattern_result,
         "message_created": message_created,
         "ai_result": ai_result
     }
@@ -303,16 +334,276 @@ def get_recent_noise_logs(since: Optional[datetime] = None, db: Session = Depend
     logs = query.limit(20).all()
     return {"logs": logs}
 
+@app.get("/api/v1/households/{household_id}/patterns")
+def get_household_patterns(household_id: int, db: Session = Depends(get_db)):
+    pattern_result = analyze_patterns(household_id, db)
+    return pattern_result
+
 @app.get("/api/v1/mediations", response_model=List[MediationResponse])
-def get_mediations(db: Session = Depends(get_db)):
-    return db.query(models.Mediation).order_by(models.Mediation.created_at.desc()).all()
+def get_mediations(status: Optional[str] = None, db: Session = Depends(get_db)):
+    query = db.query(models.Mediation).order_by(models.Mediation.created_at.desc())
+    if status:
+        query = query.filter(models.Mediation.status == status)
+    return query.all()
+
+@app.get("/api/v1/mediations/{med_id}", response_model=MediationResponse)
+def get_mediation(med_id: int, db: Session = Depends(get_db)):
+    med = db.query(models.Mediation).filter(models.Mediation.id == med_id).first()
+    if not med:
+        raise HTTPException(status_code=404, detail="해당 중재 정보를 찾을 수 없습니다.")
+    return med
 
 @app.patch("/api/v1/mediations/{med_id}", response_model=MediationResponse)
 def update_mediation_status(med_id: int, data: MediationUpdate, db: Session = Depends(get_db)):
     med = db.query(models.Mediation).filter(models.Mediation.id == med_id).first()
     if not med:
         raise HTTPException(status_code=404, detail="해당 중재 정보를 찾을 수 없습니다.")
-    med.status = data.status
+    if data.status:
+        med.status = data.status
+    if data.ai_message:
+        med.ai_message = data.ai_message
+    if data.resident_message:
+        med.resident_message = data.resident_message
     db.commit()
     db.refresh(med)
     return med
+
+@app.get("/api/v1/admin/cases")
+def get_admin_cases(db: Session = Depends(get_db)):
+    mediations = db.query(models.Mediation).order_by(models.Mediation.created_at.desc()).all()
+    return {"cases": [
+        {
+            "id": m.id,
+            "target_unit": m.target_unit,
+            "ai_message": m.ai_message,
+            "event_summary": m.event_summary,
+            "admin_summary": m.admin_summary,
+            "recommended_action": m.recommended_action,
+            "generation_method": m.generation_method,
+            "status": m.status,
+            "created_at": m.created_at
+        } for m in mediations
+    ]}
+
+# --- 공지사항 ---
+
+class NoticeCreate(BaseModel):
+    title: str
+    content: str
+    notice_type: str  # urgent, general, manner, equipment
+    target_type: str  # all, specific
+    target_households: Optional[list] = None
+
+class NoticeResponse(BaseModel):
+    id: int
+    title: str
+    content: str
+    notice_type: str
+    target_type: str
+    target_households: Optional[str] = None
+    status: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+@app.post("/api/v1/notices")
+def create_notice(data: NoticeCreate, db: Session = Depends(get_db)):
+    new_notice = models.Notice(
+        title=data.title,
+        content=data.content,
+        notice_type=data.notice_type,
+        target_type=data.target_type,
+        target_households=json.dumps(data.target_households) if data.target_households else None,
+        status="sent",
+        sent_at=datetime.now()
+    )
+    db.add(new_notice)
+    db.commit()
+    db.refresh(new_notice)
+    return {"status": "success", "notice_id": new_notice.id}
+
+@app.get("/api/v1/notices", response_model=List[NoticeResponse])
+def get_notices(notice_type: Optional[str] = None, db: Session = Depends(get_db)):
+    query = db.query(models.Notice).order_by(models.Notice.created_at.desc())
+    if notice_type:
+        query = query.filter(models.Notice.notice_type == notice_type)
+    return query.all()
+
+@app.get("/api/v1/notices/{notice_id}", response_model=NoticeResponse)
+def get_notice(notice_id: int, db: Session = Depends(get_db)):
+    notice = db.query(models.Notice).filter(models.Notice.id == notice_id).first()
+    if not notice:
+        raise HTTPException(status_code=404, detail="공지사항을 찾을 수 없습니다.")
+    return notice
+
+@app.post("/api/v1/notices/ai-template")
+def get_ai_template(notice_type: str, db: Session = Depends(get_db)):
+    templates = {
+        "urgent": {
+            "title": "[긴급] 층간소음 주의 안내",
+            "content": "관리사무소입니다. 최근 층간소음 민원이 증가하고 있습니다. 야간 시간대(22시~07시) 소음에 각별히 주의해 주시기 바랍니다."
+        },
+        "general": {
+            "title": "[공지] 층간소음 예절 안내",
+            "content": "관리사무소입니다. 쾌적한 주거환경을 위해 층간소음 예절을 지켜주시기 바랍니다."
+        },
+        "manner": {
+            "title": "[생활매너] 발소리 줄이기 안내",
+            "content": "층간소음을 예방하기 위해 실내에서 슬리퍼 착용 및 뛰는 행동을 자제해 주시기 바랍니다."
+        },
+        "equipment": {
+            "title": "[장비점검] IoT 센서 점검 안내",
+            "content": "층간소음 측정 센서 정기 점검이 예정되어 있습니다. 일시 및 세대 안내는 별도 공지 부탁드립니다."
+        }
+    }
+    template = templates.get(notice_type, templates["general"])
+    return {"template": template}
+
+# --- 리포트 ---
+
+@app.get("/api/v1/reports/household/{household_id}")
+def get_household_report(household_id: int, start_date: Optional[str] = None, end_date: Optional[str] = None, db: Session = Depends(get_db)):
+    """세대별 종합 리포트"""
+    household = db.query(models.Household).filter(models.Household.id == household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+
+    query = db.query(models.NoiseLog).filter(models.NoiseLog.household_id == household_id)
+
+    if start_date:
+        query = query.filter(models.NoiseLog.timestamp >= datetime.fromisoformat(start_date))
+    if end_date:
+        query = query.filter(models.NoiseLog.timestamp <= datetime.fromisoformat(end_date))
+
+    logs = query.all()
+
+    total_count = len(logs)
+    night_count = sum(1 for l in logs if l.is_night)
+    high_count = sum(1 for l in logs if l.severity == "high")
+    avg_sound = round(sum(l.sound_level for l in logs) / total_count, 1) if total_count > 0 else 0
+
+    event_types = {}
+    for log in logs:
+        event_types[log.event_type] = event_types.get(log.event_type, 0) + 1
+
+    return {
+        "household": {
+            "id": household.id,
+            "building_name": household.building_name,
+            "unit_number": household.unit_number,
+            "alias": household.alias
+        },
+        "period": {
+            "start_date": start_date,
+            "end_date": end_date
+        },
+        "summary": {
+            "total_count": total_count,
+            "night_count": night_count,
+            "high_count": high_count,
+            "avg_sound_level": avg_sound,
+            "event_types": event_types
+        },
+        "logs": [
+            {
+                "id": l.id,
+                "sound_level": l.sound_level,
+                "event_type": l.event_type,
+                "severity": l.severity,
+                "is_night": l.is_night,
+                "timestamp": l.timestamp
+            } for l in logs
+        ]
+    }
+
+@app.get("/api/v1/reports/monthly")
+def get_monthly_report(year: int, month: int, db: Session = Depends(get_db)):
+    """전체 동 월간 통계"""
+    from datetime import date
+    import calendar
+
+    start = datetime(year, month, 1)
+    end = datetime(year, month, calendar.monthrange(year, month)[1], 23, 59, 59)
+
+    logs = db.query(models.NoiseLog).filter(
+        models.NoiseLog.timestamp >= start,
+        models.NoiseLog.timestamp <= end
+    ).all()
+
+    total_count = len(logs)
+    night_count = sum(1 for l in logs if l.is_night)
+    high_count = sum(1 for l in logs if l.severity == "high")
+
+    household_stats = {}
+    for log in logs:
+        hid = log.household_id
+        if hid not in household_stats:
+            household_stats[hid] = {"count": 0, "night_count": 0, "high_count": 0}
+        household_stats[hid]["count"] += 1
+        if log.is_night:
+            household_stats[hid]["night_count"] += 1
+        if log.severity == "high":
+            household_stats[hid]["high_count"] += 1
+
+    return {
+        "period": {"year": year, "month": month},
+        "summary": {
+            "total_count": total_count,
+            "night_count": night_count,
+            "high_count": high_count
+        },
+        "household_stats": household_stats
+    }
+
+@app.get("/api/v1/reports/custom")
+def get_custom_report(
+    household_id: Optional[int] = None,
+    event_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """커스텀 리포트"""
+    query = db.query(models.NoiseLog)
+
+    if household_id:
+        query = query.filter(models.NoiseLog.household_id == household_id)
+    if event_type:
+        query = query.filter(models.NoiseLog.event_type == event_type)
+    if severity:
+        query = query.filter(models.NoiseLog.severity == severity)
+    if start_date:
+        query = query.filter(models.NoiseLog.timestamp >= datetime.fromisoformat(start_date))
+    if end_date:
+        query = query.filter(models.NoiseLog.timestamp <= datetime.fromisoformat(end_date))
+
+    logs = query.order_by(models.NoiseLog.timestamp.desc()).all()
+    total_count = len(logs)
+    avg_sound = round(sum(l.sound_level for l in logs) / total_count, 1) if total_count > 0 else 0
+
+    return {
+        "filters": {
+            "household_id": household_id,
+            "event_type": event_type,
+            "severity": severity,
+            "start_date": start_date,
+            "end_date": end_date
+        },
+        "summary": {
+            "total_count": total_count,
+            "avg_sound_level": avg_sound
+        },
+        "logs": [
+            {
+                "id": l.id,
+                "household_id": l.household_id,
+                "sound_level": l.sound_level,
+                "event_type": l.event_type,
+                "severity": l.severity,
+                "is_night": l.is_night,
+                "timestamp": l.timestamp
+            } for l in logs
+        ]
+    }

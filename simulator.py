@@ -3,32 +3,38 @@ import time
 import random
 from datetime import datetime
 
-# URL이 정확히 http://127.0.0.1:8000/api/v1/noise-logs 인지 확인하세요!
-URL = "http://127.0.0.1:8000/api/v1/noise-logs"
+URL = "http://127.0.0.1:8000/api/v1/sensor-readings"
 
-sensors = ["SN-A304-01", "SN-B102-05", "SN-C505-02"]
+sensors = ["SENSOR-A101-01", "SENSOR-A201-01", "SENSOR-B102-01"]
 
 print("🚀 가상 소음 데이터 시뮬레이션 시작...")
 
 while True:
     for s_id in sensors:
-        # 테스트를 위해 40~80 사이의 큰 값이 자주 나오도록 수정했습니다.
-        db_level = round(random.uniform(40.0, 80.0), 1)
-        
+        sound_level = round(random.uniform(35.0, 75.0), 1)
+        vibration_value = round(random.uniform(200, 900), 1)
+        duration_ms = random.randint(1000, 10000)
+
         data = {
             "sensor_id": s_id,
-            "decibel": db_level,
-            "timestamp": datetime.now().isoformat()
+            "sound_level": sound_level,
+            "vibration_value": vibration_value,
+            "duration_ms": duration_ms,
+            "timestamp": datetime.now().isoformat(),
+            "acceleration": {
+                "x": round(random.uniform(-0.1, 0.1), 3),
+                "y": round(random.uniform(-0.1, 0.1), 3),
+                "z": round(random.uniform(0.9, 1.2), 3)
+            }
         }
-        
+
         try:
-            # 데이터를 서버로 전송
             response = requests.post(URL, json=data)
             if response.status_code == 200:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] {s_id}: {db_level}dB -> 전송 성공!")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] {s_id}: {sound_level}dB, 진동 {vibration_value} -> 전송 성공!")
             else:
-                print(f"❌ 전송 실패: {response.status_code}")
+                print(f"❌ 전송 실패: {response.status_code} - {response.text}")
         except Exception as e:
             print(f"📡 서버 연결 실패: {e}")
-            
+
     time.sleep(5)
