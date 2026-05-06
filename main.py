@@ -42,6 +42,18 @@ if db_init.query(models.Sensor).count() == 0:
     db_init.add_all(test_sensors)
     db_init.commit()
 
+if db_init.query(models.Admin).count() == 0:
+    admin = models.Admin(
+        username="admin001",
+        name="김관리",
+        role="관리소장",
+        team="관리팀",
+        permission_level="master"
+    )
+    db_init.add(admin)
+    db_init.commit()
+
+
 app = FastAPI(title="쿵로그(KungLog) AI 통합 서버")
 
 # --- Pydantic 스키마 ---
@@ -753,3 +765,83 @@ def download_monthly_pdf(year: int, month: int, db: Session = Depends(get_db)):
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename=monthly_report_{year}_{month:02d}.pdf"}
     )
+
+# --- 관리자 프로필 ---
+
+class AdminProfileResponse(BaseModel):
+    id: int
+    username: str
+    name: str
+    role: str
+    team: str
+
+    class Config:
+        from_attributes = True
+
+class AdminProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    team: Optional[str] = None
+
+@app.get("/api/v1/admin/profile/{admin_id}", response_model=AdminProfileResponse)
+def get_admin_profile(admin_id: int, db: Session = Depends(get_db)):
+    admin = db.query(models.Admin).filter(models.Admin.id == admin_id).first()
+    if not admin:
+        raise HTTPException(status_code=404, detail="관리자를 찾을 수 없습니다.")
+    return admin
+
+@app.patch("/api/v1/admin/profile/{admin_id}", response_model=AdminProfileResponse)
+def update_admin_profile(admin_id: int, data: AdminProfileUpdate, db: Session = Depends(get_db)):
+    admin = db.query(models.Admin).filter(models.Admin.id == admin_id).first()
+    if not admin:
+        raise HTTPException(status_code=404, detail="관리자를 찾을 수 없습니다.")
+    if data.name:
+        admin.name = data.name
+    if data.role:
+        admin.role = data.role
+    if data.team:
+        admin.team = data.team
+    db.commit()
+    db.refresh(admin)
+    return admin
+
+# --- 센서 상태 및 캘리브레이션 ---
+
+@app.get("/api/v1/sensors/status")
+def get_sensors_status(db: Session = Depends(get_db)):
+    sensors = db.query(models.Sensor).all()
+    total = len(sensors)
+    online = sum(1 for s in sensors if s.is_online)
+    avg_battery = round(sum(s.battery_level for s in sensors) / total, 1) if total > 0 else 0
+    needs_calibration = sum(1 for s in sensors if s.calibration_offset != 0.0)
+
+    return {
+        "total_sensors": total,
+        "online_sensors": online,
+        "avg_battery": avg_battery,
+        "needs_calibration": needs_calibration,
+        "sensors": [
+            {
+                "sensor_id": s.sensor_id,
+                "location_unit": s.location_unit,
+                "is_online": s.is_online,
+                "battery_level": s.battery_level,
+                "calibration_offset": s.calibration_offset,
+                "source": s.source,
+                "last_checked": s.last_checked
+            } for s in sensors
+        ]
+    }
+
+class CalibrationUpdate(BaseModel):
+    calibration_offset: float
+
+@app.patch("/api/v1/sensors/{sensor_id}/calibrate")
+def calibrate_sensor(sensor_id: str, data: CalibrationUpdate, db: Session = Depends(get_db)):
+    sensor = db.query(models.Sensor).filter(models.Sensor.sensor_id == sensor_id).first()
+    if not sensor:
+        raise HTTPException(status_code=404, detail="센서를 찾을 수 없습니다.")
+    sensor.calibration_offset = data.calibration_offset
+    db.commit()
+    db.refresh(sensor)
+    return {"status": "success", "sensor_id": sensor_id, "calibration_offset": sensor.calibration_offset}
