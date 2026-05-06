@@ -38,6 +38,8 @@ if db_init.query(models.Sensor).count() == 0:
         models.Sensor(sensor_id="SENSOR-A101-01", household_id=1, location_unit="A동 101호", source="simulator", is_online=True, battery_level=85),
         models.Sensor(sensor_id="SENSOR-A201-01", household_id=2, location_unit="A동 201호", source="simulator", is_online=True, battery_level=92),
         models.Sensor(sensor_id="SENSOR-B102-01", household_id=3, location_unit="B동 102호", source="arduino", is_online=False, battery_level=12),
+        models.Sensor(sensor_id="KOONG-LOG-MIRA", household_id=1, location_unit="A동 101호", source="arduino",
+                      is_online=True, battery_level=100),  # 추가
     ]
     db_init.add_all(test_sensors)
     db_init.commit()
@@ -61,9 +63,9 @@ app = FastAPI(title="쿵로그(KungLog) AI 통합 서버")
 class NoiseData(BaseModel):
     sensor_id: str
     sound_level: float
-    vibration_value: float        # 필수로 변경
-    duration_ms: int              # 필수로 변경
-    timestamp: datetime
+    vibration_value: float
+    duration_ms: Optional[int] = None
+    timestamp: Optional[datetime] = None
     acceleration: Optional[dict] = None
 
 class DashboardStats(BaseModel):
@@ -245,6 +247,9 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
     if not sensor:
         raise HTTPException(status_code=404, detail=f"sensor_id '{data.sensor_id}' 를 찾을 수 없습니다.")
 
+    timestamp = data.timestamp or datetime.now()
+
+
     # 1. classify_event
     classification = classify_event(
         sound_level=data.sound_level,
@@ -265,7 +270,7 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
         is_night=classification["is_night"],
         confidence=classification["confidence"],
         status="new",
-        timestamp=data.timestamp
+        timestamp=timestamp
     )
     db.add(new_log)
     db.flush()
@@ -1148,3 +1153,4 @@ def get_hourly_stats(db: Session = Depends(get_db)):
                 hourly[hour_key]["night"] += 1
 
     return {"hourly": hourly, "period": "최근 24시간"}
+
