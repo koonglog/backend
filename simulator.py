@@ -38,3 +38,4 @@ while True:
             print(f"📡 서버 연결 실패: {e}")
 
     time.sleep(5)
+
