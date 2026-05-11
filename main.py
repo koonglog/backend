@@ -4,6 +4,7 @@ from sqlalchemy import func
 from pydantic import BaseModel
 from datetime import datetime, date, timedelta
 from typing import List, Optional
+
 import json
 
 import models
@@ -12,6 +13,10 @@ from database import engine, get_db
 import os
 from dotenv import load_dotenv
 from openai import OpenAI
+
+from pytz import timezone  # 추가 필요
+
+KST = timezone("Asia/Seoul")
 
 load_dotenv()
 load_dotenv(dotenv_path="/Users/ijiho/backend/.env")
@@ -132,17 +137,32 @@ def classify_event(sound_level: float, vibration_value: float = None, duration_m
         "confidence": 0.85
     }
 
+def is_night_kst(utc_dt: datetime) -> bool:
+    """UTC 시간을 KST로 변환해서 야간 판정"""
+    kst_dt = utc_dt.replace(tzinfo=timezone("UTC")).astimezone(KST)
+    hour = kst_dt.hour
+    return hour >= 22 or hour < 7
+
 def analyze_patterns(household_id: int, db: Session) -> dict:
-    """최근 7일 패턴 분석"""
-    seven_days_ago = datetime.now() - timedelta(days=7)
-    logs = db.query(models.NoiseLog).filter(
-        models.NoiseLog.household_id == household_id,
-        models.NoiseLog.timestamp >= seven_days_ago
+    """최근 7일 패턴 분석 - noise_events 테이블 사용"""
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+    events = db.query(models.NoiseEvent).filter(
+        models.NoiseEvent.household_id == household_id,
+        models.NoiseEvent.is_meaningful == True,
+        models.NoiseEvent.started_at >= seven_days_ago
     ).all()
 
-    total_count = len(logs)
-    night_count = sum(1 for l in logs if l.is_night)
-    high_count = sum(1 for l in logs if l.severity == "high")
+    total_count = len(events)
+    night_count = sum(1 for e in events if e.is_night)
+    high_count = sum(1 for e in events if e.severity == "high")
+
+    # 최근 10분 의미 이벤트 집계
+    ten_min_ago = datetime.utcnow() - timedelta(minutes=10)
+    recent_count_10min = db.query(models.NoiseEvent).filter(
+        models.NoiseEvent.household_id == household_id,
+        models.NoiseEvent.is_meaningful == True,
+        models.NoiseEvent.started_at >= ten_min_ago
+    ).count()
 
     needs_mediation = night_count >= 3 or high_count >= 5 or total_count >= 15
 
@@ -150,6 +170,7 @@ def analyze_patterns(household_id: int, db: Session) -> dict:
         "total_count": total_count,
         "night_count": night_count,
         "high_count": high_count,
+        "recent_count_10min": recent_count_10min,
         "needs_mediation": needs_mediation,
         "period_days": 7
     }
@@ -247,17 +268,76 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
     if not sensor:
         raise HTTPException(status_code=404, detail=f"sensor_id '{data.sensor_id}' 를 찾을 수 없습니다.")
 
-    timestamp = data.timestamp or datetime.now()
+    # UTC 기준 타임스탬프
+    utc_now = datetime.utcnow()
+    sensor_timestamp = data.timestamp or utc_now
 
+    # 1. raw_sensor_readings 저장 (중복 방지)
+    existing = db.query(models.RawSensorReading).filter(
+        models.RawSensorReading.sensor_id == data.sensor_id,
+        models.RawSensorReading.sensor_timestamp == sensor_timestamp
+    ).first()
 
-    # 1. classify_event
+    if existing:
+        return {"status": "duplicate", "message": "중복 데이터입니다."}
+
+    acceleration = data.acceleration or {}
+    raw = models.RawSensorReading(
+        sensor_id=data.sensor_id,
+        household_id=sensor.household_id,
+        sound_level=data.sound_level,
+        vibration_value=data.vibration_value,
+        duration_ms=data.duration_ms,
+        acceleration_x=acceleration.get("x"),
+        acceleration_y=acceleration.get("y"),
+        acceleration_z=acceleration.get("z"),
+        received_at=utc_now,
+        sensor_timestamp=sensor_timestamp
+    )
+    db.add(raw)
+    db.flush()
+
+    # 2. KST 기준 야간 판정
+    is_night = is_night_kst(sensor_timestamp)
+
+    # 3. classify_event
     classification = classify_event(
         sound_level=data.sound_level,
         vibration_value=data.vibration_value,
         duration_ms=data.duration_ms,
-        timestamp=data.timestamp
+        timestamp=sensor_timestamp
+    )
+    classification["is_night"] = is_night  # KST 야간 판정으로 덮어쓰기
+
+    # 4. is_meaningful 판정
+    is_meaningful = (
+        classification["event_type"] != "background_noise" or
+        classification["severity"] in ["medium", "high"]
     )
 
+    # 5. noise_events 저장 (의미 이벤트만)
+    noise_event = None
+    if is_meaningful:
+        noise_event = models.NoiseEvent(
+            sensor_id=data.sensor_id,
+            household_id=sensor.household_id,
+            event_type=classification["event_type"],
+            severity=classification["severity"],
+            severity_score=classification["severity_score"],
+            confidence=classification["confidence"],
+            is_night=is_night,
+            is_meaningful=True,
+            avg_sound_level=data.sound_level,
+            max_sound_level=data.sound_level,
+            avg_vibration=data.vibration_value,
+            duration_ms=data.duration_ms,
+            started_at=sensor_timestamp,
+            status="new"
+        )
+        db.add(noise_event)
+        db.flush()
+
+    # 6. noise_logs 저장 (하위 호환)
     new_log = models.NoiseLog(
         sensor_id=data.sensor_id,
         household_id=sensor.household_id,
@@ -267,31 +347,32 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
         event_type=classification["event_type"],
         severity=classification["severity"],
         severity_score=classification["severity_score"],
-        is_night=classification["is_night"],
+        is_night=is_night,
         confidence=classification["confidence"],
         status="new",
-        timestamp=timestamp
+        timestamp=sensor_timestamp
     )
     db.add(new_log)
     db.flush()
 
-    # 2. analyze_patterns
+    # 7. analyze_patterns (noise_events 기반)
     pattern_result = analyze_patterns(sensor.household_id, db)
 
     message_created = False
     ai_result = None
 
-    # 3. generate_mediation_message (severity >= medium 또는 needs_mediation)
-    if classification["severity"] in ["medium", "high"] or pattern_result["needs_mediation"]:
+    # 8. generate_mediation_message
+    if is_meaningful and (classification["severity"] in ["medium", "high"] or pattern_result["needs_mediation"]):
         unit = sensor.location_unit
         msg = generate_ai_message(
             unit=unit,
             sound_level=data.sound_level,
             event_type=classification["event_type"],
-            is_night=classification["is_night"]
+            is_night=is_night
         )
         new_med = models.Mediation(
             noise_log_id=new_log.id,
+            noise_event_id=noise_event.id if noise_event else None,
             household_id=sensor.household_id,
             target_unit=unit,
             ai_message=msg["ai_message"],
@@ -311,11 +392,14 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
 
     return {
         "status": "success",
+        "raw_saved": True,
+        "is_meaningful": is_meaningful,
+        "noise_event_id": noise_event.id if noise_event else None,
         "noise_log": {
             "id": new_log.id,
             "event_type": classification["event_type"],
             "severity": classification["severity"],
-            "is_night": classification["is_night"]
+            "is_night": is_night
         },
         "pattern_result": pattern_result,
         "message_created": message_created,
