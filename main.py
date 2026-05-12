@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pydantic import BaseModel
@@ -34,6 +35,53 @@ def ensure_sqlite_schema():
         return
 
     with engine.begin() as conn:
+        table_names = {
+            row[0] for row in conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+        if "raw_sensor_readings" in table_names:
+            raw_columns = {
+                row[1] for row in conn.exec_driver_sql("PRAGMA table_info(raw_sensor_readings)").fetchall()
+            }
+            raw_column_sql = {
+                "household_id": "ALTER TABLE raw_sensor_readings ADD COLUMN household_id INTEGER",
+                "vibration_value": "ALTER TABLE raw_sensor_readings ADD COLUMN vibration_value FLOAT",
+                "duration_ms": "ALTER TABLE raw_sensor_readings ADD COLUMN duration_ms INTEGER",
+                "acceleration_x": "ALTER TABLE raw_sensor_readings ADD COLUMN acceleration_x FLOAT",
+                "acceleration_y": "ALTER TABLE raw_sensor_readings ADD COLUMN acceleration_y FLOAT",
+                "acceleration_z": "ALTER TABLE raw_sensor_readings ADD COLUMN acceleration_z FLOAT",
+                "received_at": "ALTER TABLE raw_sensor_readings ADD COLUMN received_at DATETIME",
+                "sensor_timestamp": "ALTER TABLE raw_sensor_readings ADD COLUMN sensor_timestamp DATETIME",
+            }
+            for column_name, sql in raw_column_sql.items():
+                if column_name not in raw_columns:
+                    conn.exec_driver_sql(sql)
+
+        if "noise_events" in table_names:
+            noise_event_columns = {
+                row[1] for row in conn.exec_driver_sql("PRAGMA table_info(noise_events)").fetchall()
+            }
+            noise_event_column_sql = {
+                "severity_score": "ALTER TABLE noise_events ADD COLUMN severity_score FLOAT",
+                "confidence": "ALTER TABLE noise_events ADD COLUMN confidence FLOAT",
+                "is_night": "ALTER TABLE noise_events ADD COLUMN is_night BOOLEAN DEFAULT 0",
+                "is_meaningful": "ALTER TABLE noise_events ADD COLUMN is_meaningful BOOLEAN DEFAULT 0",
+                "pattern_label": "ALTER TABLE noise_events ADD COLUMN pattern_label VARCHAR",
+                "avg_sound_level": "ALTER TABLE noise_events ADD COLUMN avg_sound_level FLOAT",
+                "max_sound_level": "ALTER TABLE noise_events ADD COLUMN max_sound_level FLOAT",
+                "avg_vibration": "ALTER TABLE noise_events ADD COLUMN avg_vibration FLOAT",
+                "duration_ms": "ALTER TABLE noise_events ADD COLUMN duration_ms INTEGER",
+                "sample_count": "ALTER TABLE noise_events ADD COLUMN sample_count INTEGER DEFAULT 1",
+                "started_at": "ALTER TABLE noise_events ADD COLUMN started_at DATETIME",
+                "ended_at": "ALTER TABLE noise_events ADD COLUMN ended_at DATETIME",
+                "status": "ALTER TABLE noise_events ADD COLUMN status VARCHAR DEFAULT 'new'",
+            }
+            for column_name, sql in noise_event_column_sql.items():
+                if column_name not in noise_event_columns:
+                    conn.exec_driver_sql(sql)
+
         mediation_columns = {
             row[1] for row in conn.exec_driver_sql("PRAGMA table_info(mediations)").fetchall()
         }
@@ -125,6 +173,14 @@ def is_night_kst(utc_dt: datetime) -> bool:
     kst_dt = utc_dt.astimezone(KST)
     hour = kst_dt.hour
     return hour >= 22 or hour < 7
+
+def format_kst(dt: Optional[datetime]) -> Optional[str]:
+    """DB에 저장된 UTC/naive datetime을 KST 표시 문자열로 변환한다."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
 
 def classify_event_with_ai(
     data: NoiseData,
@@ -347,6 +403,157 @@ def generate_ai_message(unit: str, sound_level: float, event_type: str, is_night
 def read_root():
     return {"message": "AI 통합 쿵로그 백엔드 가동 중"}
 
+@app.get("/monitor", response_class=HTMLResponse)
+def monitor_page():
+    return """
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KungLog Monitor</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; background: #f7f7f4; color: #171717; }
+    header { padding: 20px 28px 14px; border-bottom: 2px solid #111; background: #eee6d8; }
+    h1 { margin: 0; font-size: 28px; }
+    main { padding: 22px 28px 36px; }
+    .links { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; max-width: 760px; }
+    a { display: block; padding: 18px; border: 1px solid #d1d1ca; background: white; color: #111; text-decoration: none; }
+    strong { display: block; margin-bottom: 8px; font-size: 18px; }
+    span { color: #555; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>KungLog Monitor</h1>
+  </header>
+  <main>
+    <div class="links">
+      <a href="/monitor/readings">
+        <strong>All Sensor Readings</strong>
+        <span>모든 원본 센서 수신값을 테이블로 확인</span>
+      </a>
+      <a href="/monitor/noise-events">
+        <strong>Noise Events</strong>
+        <span>AI가 의미 이벤트로 판단한 데이터만 확인</span>
+      </a>
+    </div>
+  </main>
+</body>
+</html>
+"""
+
+def render_monitor_table_page(title: str, subtitle: str, endpoint: str, table_id: str) -> str:
+    html = """
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>__TITLE__</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; background: #f7f7f4; color: #171717; }
+    header { padding: 20px 28px 14px; border-bottom: 2px solid #111; background: #eee6d8; }
+    h1 { margin: 0; font-size: 28px; }
+    main { padding: 22px 28px 36px; }
+    nav { margin-bottom: 16px; }
+    nav a { color: #111; font-weight: 700; }
+    .toolbar { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; font-size: 14px; }
+    .status { font-weight: 700; }
+    .subtitle { margin: 8px 0 0; color: #555; }
+    .table-wrap { overflow: auto; border: 1px solid #d1d1ca; background: white; }
+    table { width: 100%; min-width: 1100px; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 9px 10px; border-bottom: 1px solid #e6e6df; text-align: left; white-space: nowrap; }
+    th { position: sticky; top: 0; background: #222; color: white; font-weight: 700; }
+    tr:nth-child(even) td { background: #fafafa; }
+    .empty, .error { padding: 16px; border: 1px solid #d1d1ca; background: white; }
+    .error { color: #b42318; }
+    code { background: #ecece7; padding: 2px 5px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>__TITLE__</h1>
+    <p class="subtitle">__SUBTITLE__</p>
+  </header>
+  <main>
+    <nav><a href="/monitor">Back to Monitor</a></nav>
+    <div class="toolbar">
+      <span class="status" id="status">Loading...</span>
+      <span>Auto refresh: 2s</span>
+      <span>Endpoint: <code>__ENDPOINT__</code></span>
+    </div>
+    <div id="__TABLE_ID__"></div>
+  </main>
+
+  <script>
+    const formatValue = (value) => {
+      if (value === null || value === undefined) return "";
+      if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(3);
+      if (typeof value === "boolean") return value ? "true" : "false";
+      return String(value);
+    };
+
+    const renderTable = (targetId, columns, rows) => {
+      const target = document.getElementById(targetId);
+      if (!rows || rows.length === 0) {
+        target.innerHTML = '<div class="empty">No data</div>';
+        return;
+      }
+
+      const thead = '<thead><tr>' + columns.map((col) => `<th>${col}</th>`).join("") + '</tr></thead>';
+      const tbody = '<tbody>' + rows.map((row) => {
+        return '<tr>' + row.map((value) => `<td>${formatValue(value)}</td>`).join("") + '</tr>';
+      }).join("") + '</tbody>';
+      target.innerHTML = `<div class="table-wrap"><table>${thead}${tbody}</table></div>`;
+    };
+
+    const load = async () => {
+      const status = document.getElementById("status");
+      try {
+        const response = await fetch("__ENDPOINT__?limit=50");
+        if (!response.ok) throw new Error("API request failed");
+        const data = await response.json();
+        renderTable("__TABLE_ID__", data.columns, data.rows);
+        status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      } catch (error) {
+        status.textContent = "Load failed";
+        document.getElementById("__TABLE_ID__").innerHTML = `<div class="error">${error}</div>`;
+      }
+    };
+
+    load();
+    setInterval(load, 2000);
+  </script>
+</body>
+</html>
+"""
+    return (
+        html
+        .replace("__TITLE__", title)
+        .replace("__SUBTITLE__", subtitle)
+        .replace("__ENDPOINT__", endpoint)
+        .replace("__TABLE_ID__", table_id)
+    )
+
+@app.get("/monitor/readings", response_class=HTMLResponse)
+def monitor_readings_page():
+    return render_monitor_table_page(
+        title="All Sensor Readings",
+        subtitle="raw_sensor_readings에 저장된 모든 원본 센서 수신값",
+        endpoint="/api/v1/sensor-readings/recent",
+        table_id="readings"
+    )
+
+@app.get("/monitor/noise-events", response_class=HTMLResponse)
+def monitor_noise_events_page():
+    return render_monitor_table_page(
+        title="Noise Events",
+        subtitle="AI가 is_meaningful=true로 판단해 noise_events에 저장한 이벤트",
+        endpoint="/api/v1/noise-events/recent",
+        table_id="events"
+    )
+
 @app.get("/api/v1/dashboard/stats", response_model=DashboardStats)
 def get_dashboard_stats(db: Session = Depends(get_db)):
     total = db.query(models.Sensor).count()
@@ -551,6 +758,153 @@ def get_recent_noise_logs(since: Optional[datetime] = None, db: Session = Depend
         query = query.filter(models.NoiseLog.timestamp > since)
     logs = query.limit(20).all()
     return {"logs": logs}
+
+@app.get("/api/v1/sensor-readings/recent")
+def get_recent_sensor_readings(
+    household_id: Optional[int] = None,
+    limit: int = 20,
+    db: Session = Depends(get_db)
+):
+    """최근 원본 센서 수신값을 테이블 형태로 조회"""
+    safe_limit = min(max(limit, 1), 100)
+    query = db.query(models.RawSensorReading).order_by(models.RawSensorReading.received_at.desc())
+    if household_id:
+        query = query.filter(models.RawSensorReading.household_id == household_id)
+    readings = query.limit(safe_limit).all()
+
+    columns = [
+        "id",
+        "sensor_id",
+        "household_id",
+        "sound_level",
+        "vibration_value",
+        "duration_ms",
+        "acceleration_x",
+        "acceleration_y",
+        "acceleration_z",
+        "received_at",
+        "sensor_timestamp"
+    ]
+    rows = [
+        [
+            reading.id,
+            reading.sensor_id,
+            reading.household_id,
+            reading.sound_level,
+            reading.vibration_value,
+            reading.duration_ms,
+            reading.acceleration_x,
+            reading.acceleration_y,
+            reading.acceleration_z,
+            format_kst(reading.received_at),
+            format_kst(reading.sensor_timestamp)
+        ]
+        for reading in readings
+    ]
+
+    return {
+        "columns": columns,
+        "rows": rows,
+        "readings": [
+            dict(zip(columns, row))
+            for row in rows
+        ],
+        "total": len(rows)
+    }
+
+@app.get("/api/v1/noise-events/recent")
+def get_recent_noise_events_api(
+    household_id: Optional[int] = None,
+    limit: int = 20,
+    db: Session = Depends(get_db)
+):
+    """AI가 의미 있는 이벤트로 판단해 noise_events에 저장된 최근 이벤트를 테이블 형태로 조회"""
+    safe_limit = min(max(limit, 1), 100)
+    query = db.query(models.NoiseEvent).order_by(models.NoiseEvent.started_at.desc())
+    if household_id:
+        query = query.filter(models.NoiseEvent.household_id == household_id)
+    events = query.limit(safe_limit).all()
+
+    columns = [
+        "id",
+        "sensor_id",
+        "household_id",
+        "event_type",
+        "severity",
+        "severity_score",
+        "confidence",
+        "is_night",
+        "is_meaningful",
+        "pattern_label",
+        "avg_sound_level",
+        "max_sound_level",
+        "avg_vibration",
+        "duration_ms",
+        "sample_count",
+        "started_at",
+        "ended_at",
+        "status"
+    ]
+    rows = [
+        [
+            event.id,
+            event.sensor_id,
+            event.household_id,
+            event.event_type,
+            event.severity,
+            event.severity_score,
+            event.confidence,
+            event.is_night,
+            event.is_meaningful,
+            event.pattern_label,
+            event.avg_sound_level,
+            event.max_sound_level,
+            event.avg_vibration,
+            event.duration_ms,
+            event.sample_count,
+            format_kst(event.started_at),
+            format_kst(event.ended_at),
+            event.status
+        ]
+        for event in events
+    ]
+
+    return {
+        "columns": columns,
+        "rows": rows,
+        "events": [
+            dict(zip(columns, row))
+            for row in rows
+        ],
+        "total": len(rows)
+    }
+
+@app.get("/api/v1/noise-events/{event_id}")
+def get_noise_event(event_id: int, db: Session = Depends(get_db)):
+    event = db.query(models.NoiseEvent).filter(models.NoiseEvent.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="소음 이벤트를 찾을 수 없습니다.")
+
+    return {
+        "id": event.id,
+        "sensor_id": event.sensor_id,
+        "household_id": event.household_id,
+        "event_type": event.event_type,
+        "severity": event.severity,
+        "severity_score": event.severity_score,
+        "confidence": event.confidence,
+        "is_night": event.is_night,
+        "is_meaningful": event.is_meaningful,
+        "pattern_label": event.pattern_label,
+        "avg_sound_level": event.avg_sound_level,
+        "max_sound_level": event.max_sound_level,
+        "avg_vibration": event.avg_vibration,
+        "duration_ms": event.duration_ms,
+        "sample_count": event.sample_count,
+        "started_at": event.started_at,
+        "ended_at": event.ended_at,
+        "status": event.status
+    }
 
 @app.get("/api/v1/households/{household_id}/patterns")
 def get_household_patterns(household_id: int, db: Session = Depends(get_db)):
