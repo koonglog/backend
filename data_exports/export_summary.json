@@ -1,0 +1,12 @@
+{
+  "raw_sensor_readings": {
+    "row_count": 898,
+    "csv": "data_exports\\all_sensor_readings.csv",
+    "json": "data_exports\\all_sensor_readings.json"
+  },
+  "noise_events": {
+    "row_count": 419,
+    "csv": "data_exports\\all_noise_events.csv",
+    "json": "data_exports\\all_noise_events.json"
+  }
+}

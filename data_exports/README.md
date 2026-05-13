@@ -1,8 +1,11 @@
 # KoongLog Sensor Data Exports
 
-This directory contains exported monitoring data from the local backend API.
+This directory contains exported sensor data for AI training.
 
-- `sensor_readings_recent.json`: Recent rows from `GET /api/v1/sensor-readings/recent?limit=100`
-- `noise_events_recent.json`: Recent rows from `GET /api/v1/noise-events/recent?limit=100`
+- `all_sensor_readings.csv`: All rows from `raw_sensor_readings`
+- `all_sensor_readings.json`: Pretty JSON version of all `raw_sensor_readings` rows
+- `all_noise_events.csv`: All rows from `noise_events`
+- `all_noise_events.json`: Pretty JSON version of all `noise_events` rows
+- `export_summary.json`: Row counts and export file paths
 
-`sensor_readings_recent.json` contains raw sensor readings. `noise_events_recent.json` contains events that the AI service classified as meaningful and that were stored in `noise_events`.
+`raw_sensor_readings` contains all received sensor values. `noise_events` contains only events that the AI service classified as meaningful.
