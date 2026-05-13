@@ -31,9 +31,9 @@ db_init = next(get_db())
 
 if db_init.query(models.Household).count() == 0:
     households = [
-        models.Household(building_name="A동", unit_number="101호", floor=1, alias="A-101"),
-        models.Household(building_name="A동", unit_number="201호", floor=2, alias="A-201"),
-        models.Household(building_name="B동", unit_number="102호", floor=1, alias="B-102"),
+        models.Household(building_name="A동", unit_number="101호", floor=1, alias="A-101", resident_name="김철수", phone_number="010-1234-5678"),
+        models.Household(building_name="A동", unit_number="201호", floor=2, alias="A-201", resident_name="이영희", phone_number="010-2345-6789"),
+        models.Household(building_name="B동", unit_number="102호", floor=1, alias="B-102", resident_name="박민수", phone_number="010-3456-7890"),
     ]
     db_init.add_all(households)
     db_init.commit()
@@ -1117,6 +1117,8 @@ def get_dashboard_households(db: Session = Depends(get_db)):
             "alias": household.alias,
             "building_name": household.building_name,
             "unit_number": household.unit_number,
+            "resident_name": household.resident_name,  # 추가
+            "phone_number": household.phone_number,  # 추가
             "status": status,
             "status_label": status_label,
             "today_count": total_today,

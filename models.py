@@ -22,6 +22,8 @@ class Household(Base):
     unit_number = Column(String)
     floor = Column(Integer)
     alias = Column(String)
+    resident_name = Column(String, nullable=True)   # 추가
+    phone_number = Column(String, nullable=True)    # 추가
 
 # 관리자 테이블
 class Admin(Base):
@@ -155,3 +157,4 @@ class AdminSettings(Base):
     work_start_time = Column(String, nullable=True)
     work_end_time = Column(String, nullable=True)
     updated_at = Column(DateTime, server_default=func.now())
+
