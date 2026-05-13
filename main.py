@@ -82,11 +82,24 @@ def ensure_sqlite_schema():
                 if column_name not in noise_event_columns:
                     conn.exec_driver_sql(sql)
 
-        mediation_columns = {
-            row[1] for row in conn.exec_driver_sql("PRAGMA table_info(mediations)").fetchall()
-        }
-        if "noise_event_id" not in mediation_columns:
-            conn.exec_driver_sql("ALTER TABLE mediations ADD COLUMN noise_event_id INTEGER")
+        if "households" in table_names:
+            household_columns = {
+                row[1] for row in conn.exec_driver_sql("PRAGMA table_info(households)").fetchall()
+            }
+            household_column_sql = {
+                "resident_name": "ALTER TABLE households ADD COLUMN resident_name VARCHAR",
+                "phone_number": "ALTER TABLE households ADD COLUMN phone_number VARCHAR",
+            }
+            for column_name, sql in household_column_sql.items():
+                if column_name not in household_columns:
+                    conn.exec_driver_sql(sql)
+
+        if "mediations" in table_names:
+            mediation_columns = {
+                row[1] for row in conn.exec_driver_sql("PRAGMA table_info(mediations)").fetchall()
+            }
+            if "noise_event_id" not in mediation_columns:
+                conn.exec_driver_sql("ALTER TABLE mediations ADD COLUMN noise_event_id INTEGER")
 
 ensure_sqlite_schema()
 
@@ -182,6 +195,31 @@ def format_kst(dt: Optional[datetime]) -> Optional[str]:
         dt = dt.replace(tzinfo=UTC)
     return dt.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
 
+def to_utc_iso(value: Optional[datetime]) -> Optional[str]:
+    """datetime 값을 AI 서비스에 전달할 UTC ISO 문자열로 변환한다."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+def serialize_noise_event_for_ai(event: models.NoiseEvent) -> dict:
+    return {
+        "detected_at": to_utc_iso(event.started_at),
+        "event_type": event.event_type,
+        "severity": event.severity,
+        "is_meaningful": bool(event.is_meaningful),
+    }
+
+def get_recent_meaningful_events_10min(household_id: int, db: Session) -> list:
+    ten_min_ago = datetime.utcnow() - timedelta(minutes=10)
+    events = db.query(models.NoiseEvent).filter(
+        models.NoiseEvent.household_id == household_id,
+        models.NoiseEvent.is_meaningful == True,
+        models.NoiseEvent.started_at >= ten_min_ago
+    ).order_by(models.NoiseEvent.started_at.asc()).all()
+    return [serialize_noise_event_for_ai(event) for event in events]
+
 def classify_event_with_ai(
     data: NoiseData,
     sensor_timestamp: datetime,
@@ -198,10 +236,7 @@ def classify_event_with_ai(
     accel_y = float(acceleration.get("y", 0.0) or 0.0)
     accel_z = float(acceleration.get("z", 1.0) or 1.0)
     accel_delta = abs(math.sqrt(accel_x ** 2 + accel_y ** 2 + accel_z ** 2) - 1.0)
-    recent_events = get_recent_noise_events(household_id, db) if household_id else {
-        "recent_10min": [],
-        "recent_7days": []
-    }
+    recent_events_10min = get_recent_meaningful_events_10min(household_id, db) if household_id else []
 
     try:
         response = requests.post(
@@ -216,9 +251,9 @@ def classify_event_with_ai(
                     "duration_ms": data.duration_ms or 0,
                     "accel_delta": accel_delta,
                     "timestamp": sensor_timestamp.isoformat(),
-                    "recent_count_10min": len(recent_events["recent_10min"])
+                    "recent_count_10min": len(recent_events_10min)
                 },
-                "recent_meaningful_events_10min": recent_events["recent_10min"]
+                "recent_meaningful_events_10min": recent_events_10min
             },
             timeout=3
         )
@@ -251,46 +286,36 @@ def classify_event_with_ai(
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI 이벤트 분류 호출 실패: {e}")
 
-def get_recent_noise_events(household_id: int, db: Session) -> dict:
-    """AI팀 패턴 분석 API에 전달할 최근 10분/7일 이벤트를 조회한다."""
-    ten_min_ago = datetime.utcnow() - timedelta(minutes=10)
-    seven_days_ago = datetime.utcnow() - timedelta(days=7)
-
-    recent_10min = db.query(models.NoiseEvent).filter(
-        models.NoiseEvent.household_id == household_id,
-        models.NoiseEvent.is_meaningful == True,
-        models.NoiseEvent.started_at >= ten_min_ago
-    ).order_by(models.NoiseEvent.started_at.desc()).all()
+def get_pattern_analysis_payload(household_id: int, db: Session) -> dict:
+    """AI팀 패턴 분석 API 스키마에 맞는 최근 7일 이벤트 payload를 구성한다."""
+    reference_time = datetime.now(UTC)
+    seven_days_ago = reference_time.replace(tzinfo=None) - timedelta(days=7)
 
     recent_7days = db.query(models.NoiseEvent).filter(
         models.NoiseEvent.household_id == household_id,
         models.NoiseEvent.is_meaningful == True,
         models.NoiseEvent.started_at >= seven_days_ago
-    ).order_by(models.NoiseEvent.started_at.desc()).all()
+    ).order_by(models.NoiseEvent.started_at.asc()).all()
 
-    def serialize(event):
-        return {
-            "id": event.id,
-            "sensor_id": event.sensor_id,
-            "household_id": event.household_id,
-            "event_type": event.event_type,
-            "severity": event.severity,
-            "is_night": event.is_night,
-            "avg_sound_level": event.avg_sound_level,
-            "max_sound_level": event.max_sound_level,
-            "avg_vibration": event.avg_vibration,
-            "duration_ms": event.duration_ms,
-            "started_at": event.started_at.isoformat() if event.started_at else None
-        }
+    recent_mediations = db.query(models.Mediation).filter(
+        models.Mediation.household_id == household_id,
+        models.Mediation.created_at >= seven_days_ago
+    ).order_by(models.Mediation.created_at.asc()).all()
 
     return {
-        "recent_10min": [serialize(event) for event in recent_10min],
-        "recent_7days": [serialize(event) for event in recent_7days]
+        "household_id": household_id,
+        "analysis_period_days": 7,
+        "reference_time": to_utc_iso(reference_time),
+        "noise_events": [serialize_noise_event_for_ai(event) for event in recent_7days],
+        "mediation_messages": [
+            {"created_at": to_utc_iso(mediation.created_at)}
+            for mediation in recent_mediations
+        ]
     }
 
 def analyze_patterns_with_ai(household_id: int, db: Session) -> dict:
     """AI팀 패턴 분석 API를 호출하고, 실패하면 요청 실패로 처리한다."""
-    recent_events = get_recent_noise_events(household_id, db)
+    payload = get_pattern_analysis_payload(household_id, db)
 
     if not AI_SERVICE_URL:
         raise HTTPException(status_code=503, detail="AI_SERVICE_URL이 설정되지 않았습니다.")
@@ -298,11 +323,7 @@ def analyze_patterns_with_ai(household_id: int, db: Session) -> dict:
     try:
         response = requests.post(
             f"{AI_SERVICE_URL.rstrip('/')}/api/v1/ai/analyze-patterns",
-            json={
-                "household_id": household_id,
-                "recent_events_10min": recent_events["recent_10min"],
-                "recent_events_7days": recent_events["recent_7days"]
-            },
+            json=payload,
             timeout=3
         )
         if response.status_code >= 400:
