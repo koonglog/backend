@@ -1768,3 +1768,84 @@ def get_hourly_stats(hours: int = 24, db: Session = Depends(get_db)):
 
     return {"hourly": hourly, "period": f"최근 {hours}시간"}
 
+
+# --- 협의 일정 ---
+
+class MediationScheduleCreate(BaseModel):
+    available_dates: list
+    confirmed_date: Optional[datetime] = None
+
+class MediationScheduleResponse(BaseModel):
+    id: int
+    mediation_id: int
+    available_dates: Optional[str] = None
+    confirmed_date: Optional[datetime] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+@app.post("/api/v1/mediations/{med_id}/schedule")
+def create_schedule(med_id: int, data: MediationScheduleCreate, db: Session = Depends(get_db)):
+    med = db.query(models.Mediation).filter(models.Mediation.id == med_id).first()
+    if not med:
+        raise HTTPException(status_code=404, detail="중재 정보를 찾을 수 없습니다.")
+    schedule = models.MediationSchedule(
+        mediation_id=med_id,
+        available_dates=json.dumps(data.available_dates, ensure_ascii=False),
+        confirmed_date=data.confirmed_date
+    )
+    db.add(schedule)
+    db.commit()
+    db.refresh(schedule)
+    return {"status": "success", "schedule_id": schedule.id}
+
+@app.get("/api/v1/mediations/{med_id}/schedule", response_model=MediationScheduleResponse)
+def get_schedule(med_id: int, db: Session = Depends(get_db)):
+    schedule = db.query(models.MediationSchedule).filter(
+        models.MediationSchedule.mediation_id == med_id
+    ).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="협의 일정을 찾을 수 없습니다.")
+    return schedule
+
+@app.patch("/api/v1/mediations/{med_id}/schedule")
+def update_schedule(med_id: int, data: MediationScheduleCreate, db: Session = Depends(get_db)):
+    schedule = db.query(models.MediationSchedule).filter(
+        models.MediationSchedule.mediation_id == med_id
+    ).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="협의 일정을 찾을 수 없습니다.")
+    if data.available_dates:
+        schedule.available_dates = json.dumps(data.available_dates, ensure_ascii=False)
+    if data.confirmed_date:
+        schedule.confirmed_date = data.confirmed_date
+    db.commit()
+    db.refresh(schedule)
+    return {"status": "success"}
+
+@app.get("/api/v1/mediations/{med_id}/schedule/overlap")
+def get_schedule_overlap(med_id: int, db: Session = Depends(get_db)):
+    med = db.query(models.Mediation).filter(models.Mediation.id == med_id).first()
+    if not med:
+        raise HTTPException(status_code=404, detail="중재 정보를 찾을 수 없습니다.")
+
+    schedules = db.query(models.MediationSchedule).filter(
+        models.MediationSchedule.mediation_id == med_id
+    ).all()
+
+    overlap_counts = {str(i): 0 for i in range(1, 25)}
+
+    for schedule in schedules:
+        if schedule.available_dates:
+            dates = json.loads(schedule.available_dates)
+            for hour in dates:
+                key = str(hour)
+                if key in overlap_counts:
+                    overlap_counts[key] += 1
+
+    return {
+        "mediation_id": med_id,
+        "overlap_counts": overlap_counts,
+        "total_responses": len(schedules)
+    }

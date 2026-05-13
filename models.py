@@ -158,3 +158,13 @@ class AdminSettings(Base):
     work_end_time = Column(String, nullable=True)
     updated_at = Column(DateTime, server_default=func.now())
 
+#캘린더 테이블
+class MediationSchedule(Base):
+    __tablename__ = "mediation_schedules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    mediation_id = Column(Integer, ForeignKey("mediations.id"))
+    available_dates = Column(Text, nullable=True)
+    confirmed_date = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now())
