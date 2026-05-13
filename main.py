@@ -24,7 +24,7 @@ load_dotenv()
 load_dotenv(dotenv_path="/Users/ijiho/backend/.env")
 ENABLE_OPENAI = os.getenv("ENABLE_OPENAI", "false").lower() == "true"
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if ENABLE_OPENAI else None
-AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://10.86.116.207:8001")
+AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://10.118.65.207:8001")
 
 # DB 테이블 생성
 models.Base.metadata.create_all(bind=engine)
