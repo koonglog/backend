@@ -1005,10 +1005,12 @@ def create_notice(data: NoticeCreate, db: Session = Depends(get_db)):
     return {"status": "success", "notice_id": new_notice.id, "scheduled_at": data.scheduled_at}
 
 @app.get("/api/v1/notices", response_model=List[NoticeResponse])
-def get_notices(notice_type: Optional[str] = None, db: Session = Depends(get_db)):
+def get_notices(notice_type: Optional[str] = None, status: Optional[str] = None, db: Session = Depends(get_db)):
     query = db.query(models.Notice).order_by(models.Notice.created_at.desc())
     if notice_type:
         query = query.filter(models.Notice.notice_type == notice_type)
+    if status:
+        query = query.filter(models.Notice.status == status)
     return query.all()
 
 @app.get("/api/v1/notices/{notice_id}", response_model=NoticeResponse)
@@ -1016,6 +1018,42 @@ def get_notice(notice_id: int, db: Session = Depends(get_db)):
     notice = db.query(models.Notice).filter(models.Notice.id == notice_id).first()
     if not notice:
         raise HTTPException(status_code=404, detail="공지사항을 찾을 수 없습니다.")
+    return notice
+
+@app.delete("/api/v1/notices/{notice_id}")
+def delete_notice(notice_id: int, db: Session = Depends(get_db)):
+    notice = db.query(models.Notice).filter(models.Notice.id == notice_id).first()
+    if not notice:
+        raise HTTPException(status_code=404, detail="공지사항을 찾을 수 없습니다.")
+    if notice.status != "scheduled":
+        raise HTTPException(status_code=400, detail="예약된 공지사항만 취소할 수 있습니다.")
+    db.delete(notice)
+    db.commit()
+    return {"status": "success", "notice_id": notice_id}
+
+class NoticeUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    notice_type: Optional[str] = None
+    scheduled_at: Optional[datetime] = None
+
+@app.patch("/api/v1/notices/{notice_id}", response_model=NoticeResponse)
+def update_notice(notice_id: int, data: NoticeUpdate, db: Session = Depends(get_db)):
+    notice = db.query(models.Notice).filter(models.Notice.id == notice_id).first()
+    if not notice:
+        raise HTTPException(status_code=404, detail="공지사항을 찾을 수 없습니다.")
+    if notice.status != "scheduled":
+        raise HTTPException(status_code=400, detail="예약된 공지사항만 수정할 수 있습니다.")
+    if data.title:
+        notice.title = data.title
+    if data.content:
+        notice.content = data.content
+    if data.notice_type:
+        notice.notice_type = data.notice_type
+    if data.scheduled_at:
+        notice.sent_at = data.scheduled_at
+    db.commit()
+    db.refresh(notice)
     return notice
 
 @app.post("/api/v1/notices/ai-template")
