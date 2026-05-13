@@ -13,7 +13,7 @@ class TeamType(str, enum.Enum):
     ADMIN = "관리팀"
     SECURITY = "보안팀"
 
-# 건물/세대 테이블
+# 건물/세대 테이블 (신규)
 class Household(Base):
     __tablename__ = "households"
 
@@ -41,9 +41,9 @@ class Sensor(Base):
     __tablename__ = "sensors"
 
     sensor_id = Column(String, primary_key=True, index=True)
-    household_id = Column(Integer, ForeignKey("households.id"), nullable=True)
+    household_id = Column(Integer, ForeignKey("households.id"), nullable=True)  # 세대 연결 (신규)
     location_unit = Column(String)
-    source = Column(String, default="simulator")  # arduino | simulator
+    source = Column(String, default="simulator")  # arduino | simulator (신규)
     is_online = Column(Boolean, default=True)
     battery_level = Column(Integer, default=100)
     calibration_offset = Column(Float, default=0.0)

@@ -78,3 +78,4 @@ class NoiseAnalysisLogResponse(BaseModel):
 
     class Config:
         from_attributes = True
+

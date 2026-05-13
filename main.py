@@ -1,11 +1,14 @@
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pydantic import BaseModel
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from typing import List, Optional
 
 import json
+import math
+import requests
 
 import models
 from database import engine, get_db
@@ -14,17 +17,78 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from pytz import timezone  # 추가 필요
-
-KST = timezone("Asia/Seoul")
+KST = timezone(timedelta(hours=9))
+UTC = timezone.utc
 
 load_dotenv()
 load_dotenv(dotenv_path="/Users/ijiho/backend/.env")
 ENABLE_OPENAI = os.getenv("ENABLE_OPENAI", "false").lower() == "true"
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if ENABLE_OPENAI else None
+AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://10.118.65.207:8001")
 
 # DB 테이블 생성
 models.Base.metadata.create_all(bind=engine)
+
+def ensure_sqlite_schema():
+    """create_all은 기존 테이블 컬럼을 갱신하지 않으므로 개발 DB에 필요한 컬럼을 보정한다."""
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.begin() as conn:
+        table_names = {
+            row[0] for row in conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+        if "raw_sensor_readings" in table_names:
+            raw_columns = {
+                row[1] for row in conn.exec_driver_sql("PRAGMA table_info(raw_sensor_readings)").fetchall()
+            }
+            raw_column_sql = {
+                "household_id": "ALTER TABLE raw_sensor_readings ADD COLUMN household_id INTEGER",
+                "vibration_value": "ALTER TABLE raw_sensor_readings ADD COLUMN vibration_value FLOAT",
+                "duration_ms": "ALTER TABLE raw_sensor_readings ADD COLUMN duration_ms INTEGER",
+                "acceleration_x": "ALTER TABLE raw_sensor_readings ADD COLUMN acceleration_x FLOAT",
+                "acceleration_y": "ALTER TABLE raw_sensor_readings ADD COLUMN acceleration_y FLOAT",
+                "acceleration_z": "ALTER TABLE raw_sensor_readings ADD COLUMN acceleration_z FLOAT",
+                "received_at": "ALTER TABLE raw_sensor_readings ADD COLUMN received_at DATETIME",
+                "sensor_timestamp": "ALTER TABLE raw_sensor_readings ADD COLUMN sensor_timestamp DATETIME",
+            }
+            for column_name, sql in raw_column_sql.items():
+                if column_name not in raw_columns:
+                    conn.exec_driver_sql(sql)
+
+        if "noise_events" in table_names:
+            noise_event_columns = {
+                row[1] for row in conn.exec_driver_sql("PRAGMA table_info(noise_events)").fetchall()
+            }
+            noise_event_column_sql = {
+                "severity_score": "ALTER TABLE noise_events ADD COLUMN severity_score FLOAT",
+                "confidence": "ALTER TABLE noise_events ADD COLUMN confidence FLOAT",
+                "is_night": "ALTER TABLE noise_events ADD COLUMN is_night BOOLEAN DEFAULT 0",
+                "is_meaningful": "ALTER TABLE noise_events ADD COLUMN is_meaningful BOOLEAN DEFAULT 0",
+                "pattern_label": "ALTER TABLE noise_events ADD COLUMN pattern_label VARCHAR",
+                "avg_sound_level": "ALTER TABLE noise_events ADD COLUMN avg_sound_level FLOAT",
+                "max_sound_level": "ALTER TABLE noise_events ADD COLUMN max_sound_level FLOAT",
+                "avg_vibration": "ALTER TABLE noise_events ADD COLUMN avg_vibration FLOAT",
+                "duration_ms": "ALTER TABLE noise_events ADD COLUMN duration_ms INTEGER",
+                "sample_count": "ALTER TABLE noise_events ADD COLUMN sample_count INTEGER DEFAULT 1",
+                "started_at": "ALTER TABLE noise_events ADD COLUMN started_at DATETIME",
+                "ended_at": "ALTER TABLE noise_events ADD COLUMN ended_at DATETIME",
+                "status": "ALTER TABLE noise_events ADD COLUMN status VARCHAR DEFAULT 'new'",
+            }
+            for column_name, sql in noise_event_column_sql.items():
+                if column_name not in noise_event_columns:
+                    conn.exec_driver_sql(sql)
+
+        mediation_columns = {
+            row[1] for row in conn.exec_driver_sql("PRAGMA table_info(mediations)").fetchall()
+        }
+        if "noise_event_id" not in mediation_columns:
+            conn.exec_driver_sql("ALTER TABLE mediations ADD COLUMN noise_event_id INTEGER")
+
+ensure_sqlite_schema()
 
 # 초기 seed 데이터
 db_init = next(get_db())
@@ -100,80 +164,181 @@ class MediationUpdate(BaseModel):
     ai_message: Optional[str] = None
     resident_message: Optional[str] = None
 
-# --- AI 로직 ---
-
-def classify_event(sound_level: float, vibration_value: float = None, duration_ms: int = None, timestamp: datetime = None) -> dict:
-    event_type = "background_noise"
-    severity = "low"
-    severity_score = 0.0
-    is_night = False
-
-    if timestamp:
-        hour = timestamp.hour
-        is_night = hour >= 22 or hour < 7
-
-    if vibration_value and vibration_value >= 600 and sound_level >= 45:
-        event_type = "impact_noise"
-        severity = "high" if sound_level >= 60 else "medium"
-        severity_score = min((sound_level - 40) / 40, 1.0)
-    elif sound_level >= 45:
-        event_type = "daily_noise"
-        severity = "medium"
-        severity_score = 0.5
-    elif sound_level >= 40:
-        event_type = "background_noise"
-        severity = "low"
-        severity_score = 0.2
-
-    if is_night and severity == "medium":
-        severity = "high"
-        severity_score = min(severity_score + 0.2, 1.0)
-
-    return {
-        "event_type": event_type,
-        "severity": severity,
-        "severity_score": round(severity_score, 2),
-        "is_night": is_night,
-        "confidence": 0.85
-    }
+# --- AI 연동 로직 ---
 
 def is_night_kst(utc_dt: datetime) -> bool:
     """UTC 시간을 KST로 변환해서 야간 판정"""
-    kst_dt = utc_dt.replace(tzinfo=timezone("UTC")).astimezone(KST)
+    if utc_dt.tzinfo is None:
+        utc_dt = utc_dt.replace(tzinfo=UTC)
+    kst_dt = utc_dt.astimezone(KST)
     hour = kst_dt.hour
     return hour >= 22 or hour < 7
 
-def analyze_patterns(household_id: int, db: Session) -> dict:
-    """최근 7일 패턴 분석 - noise_events 테이블 사용"""
-    seven_days_ago = datetime.utcnow() - timedelta(days=7)
-    events = db.query(models.NoiseEvent).filter(
-        models.NoiseEvent.household_id == household_id,
-        models.NoiseEvent.is_meaningful == True,
-        models.NoiseEvent.started_at >= seven_days_ago
-    ).all()
+def format_kst(dt: Optional[datetime]) -> Optional[str]:
+    """DB에 저장된 UTC/naive datetime을 KST 표시 문자열로 변환한다."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(KST).strftime("%Y-%m-%d %H:%M:%S")
 
-    total_count = len(events)
-    night_count = sum(1 for e in events if e.is_night)
-    high_count = sum(1 for e in events if e.severity == "high")
+def classify_event_with_ai(
+    data: NoiseData,
+    sensor_timestamp: datetime,
+    is_night: bool,
+    household_id: Optional[int],
+    db: Session
+) -> dict:
+    """AI팀 이벤트 분류 API를 호출하고, 실패하면 요청 실패로 처리한다."""
+    if not AI_SERVICE_URL:
+        raise HTTPException(status_code=503, detail="AI_SERVICE_URL이 설정되지 않았습니다.")
 
-    # 최근 10분 의미 이벤트 집계
+    acceleration = data.acceleration or {}
+    accel_x = float(acceleration.get("x", 0.0) or 0.0)
+    accel_y = float(acceleration.get("y", 0.0) or 0.0)
+    accel_z = float(acceleration.get("z", 1.0) or 1.0)
+    accel_delta = abs(math.sqrt(accel_x ** 2 + accel_y ** 2 + accel_z ** 2) - 1.0)
+    recent_events = get_recent_noise_events(household_id, db) if household_id else {
+        "recent_10min": [],
+        "recent_7days": []
+    }
+
+    try:
+        response = requests.post(
+            f"{AI_SERVICE_URL.rstrip('/')}/api/v1/ai/classify-event",
+            json={
+                "sensor_id": data.sensor_id,
+                "source": "backend",
+                "household_id": household_id,
+                "event_feature": {
+                    "sound_level": data.sound_level,
+                    "vibration_value": data.vibration_value,
+                    "duration_ms": data.duration_ms or 0,
+                    "accel_delta": accel_delta,
+                    "timestamp": sensor_timestamp.isoformat(),
+                    "recent_count_10min": len(recent_events["recent_10min"])
+                },
+                "recent_meaningful_events_10min": recent_events["recent_10min"]
+            },
+            timeout=3
+        )
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=502,
+                detail=f"AI 이벤트 분류 호출 실패: {response.status_code} {response.text}"
+            )
+        result = response.json()
+        classification = result.get("classification")
+        if not classification:
+            raise HTTPException(
+                status_code=502,
+                detail="AI 이벤트 분류 응답에 classification 필드가 없습니다."
+            )
+        required_fields = ["event_type", "severity", "is_meaningful"]
+        missing = [field for field in required_fields if field not in classification]
+        if missing:
+            raise HTTPException(
+                status_code=502,
+                detail=f"AI 이벤트 분류 응답에 필수 필드가 없습니다: {', '.join(missing)}"
+            )
+        classification.setdefault("severity_score", None)
+        classification.setdefault("confidence", None)
+        classification.setdefault("is_night", is_night)
+        classification["source"] = "ai"
+        return classification
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI 이벤트 분류 호출 실패: {e}")
+
+def get_recent_noise_events(household_id: int, db: Session) -> dict:
+    """AI팀 패턴 분석 API에 전달할 최근 10분/7일 이벤트를 조회한다."""
     ten_min_ago = datetime.utcnow() - timedelta(minutes=10)
-    recent_count_10min = db.query(models.NoiseEvent).filter(
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+
+    recent_10min = db.query(models.NoiseEvent).filter(
         models.NoiseEvent.household_id == household_id,
         models.NoiseEvent.is_meaningful == True,
         models.NoiseEvent.started_at >= ten_min_ago
-    ).count()
+    ).order_by(models.NoiseEvent.started_at.desc()).all()
 
-    needs_mediation = night_count >= 3 or high_count >= 5 or total_count >= 15
+    recent_7days = db.query(models.NoiseEvent).filter(
+        models.NoiseEvent.household_id == household_id,
+        models.NoiseEvent.is_meaningful == True,
+        models.NoiseEvent.started_at >= seven_days_ago
+    ).order_by(models.NoiseEvent.started_at.desc()).all()
+
+    def serialize(event):
+        return {
+            "id": event.id,
+            "sensor_id": event.sensor_id,
+            "household_id": event.household_id,
+            "event_type": event.event_type,
+            "severity": event.severity,
+            "is_night": event.is_night,
+            "avg_sound_level": event.avg_sound_level,
+            "max_sound_level": event.max_sound_level,
+            "avg_vibration": event.avg_vibration,
+            "duration_ms": event.duration_ms,
+            "started_at": event.started_at.isoformat() if event.started_at else None
+        }
 
     return {
-        "total_count": total_count,
-        "night_count": night_count,
-        "high_count": high_count,
-        "recent_count_10min": recent_count_10min,
-        "needs_mediation": needs_mediation,
-        "period_days": 7
+        "recent_10min": [serialize(event) for event in recent_10min],
+        "recent_7days": [serialize(event) for event in recent_7days]
     }
+
+def analyze_patterns_with_ai(household_id: int, db: Session) -> dict:
+    """AI팀 패턴 분석 API를 호출하고, 실패하면 요청 실패로 처리한다."""
+    recent_events = get_recent_noise_events(household_id, db)
+
+    if not AI_SERVICE_URL:
+        raise HTTPException(status_code=503, detail="AI_SERVICE_URL이 설정되지 않았습니다.")
+
+    try:
+        response = requests.post(
+            f"{AI_SERVICE_URL.rstrip('/')}/api/v1/ai/analyze-patterns",
+            json={
+                "household_id": household_id,
+                "recent_events_10min": recent_events["recent_10min"],
+                "recent_events_7days": recent_events["recent_7days"]
+            },
+            timeout=3
+        )
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=502,
+                detail=f"AI 패턴 분석 호출 실패: {response.status_code} {response.text}"
+            )
+        result = response.json()
+        analysis = (
+            result.get("analysis")
+            or result.get("pattern_analysis")
+            or result.get("pattern_result")
+            or result
+        )
+        required_fields = [
+            "recent_count_10min",
+            "pattern_label",
+            "needs_mediation",
+            "needs_escalation",
+            "summary"
+        ]
+        missing = [field for field in required_fields if field not in analysis]
+        if missing:
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": f"AI 패턴 분석 응답에 필수 필드가 없습니다: {', '.join(missing)}",
+                    "ai_response": result
+                }
+            )
+        analysis["source"] = "ai"
+        return analysis
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"AI 패턴 분석 호출 실패: {e}")
 
 def generate_ai_message(unit: str, sound_level: float, event_type: str, is_night: bool) -> dict:
     time_label = "야간 시간대" if is_night else "해당 시간대"
@@ -238,6 +403,157 @@ def generate_ai_message(unit: str, sound_level: float, event_type: str, is_night
 def read_root():
     return {"message": "AI 통합 쿵로그 백엔드 가동 중"}
 
+@app.get("/monitor", response_class=HTMLResponse)
+def monitor_page():
+    return """
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KungLog Monitor</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; background: #f7f7f4; color: #171717; }
+    header { padding: 20px 28px 14px; border-bottom: 2px solid #111; background: #eee6d8; }
+    h1 { margin: 0; font-size: 28px; }
+    main { padding: 22px 28px 36px; }
+    .links { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; max-width: 760px; }
+    a { display: block; padding: 18px; border: 1px solid #d1d1ca; background: white; color: #111; text-decoration: none; }
+    strong { display: block; margin-bottom: 8px; font-size: 18px; }
+    span { color: #555; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>KungLog Monitor</h1>
+  </header>
+  <main>
+    <div class="links">
+      <a href="/monitor/readings">
+        <strong>All Sensor Readings</strong>
+        <span>모든 원본 센서 수신값을 테이블로 확인</span>
+      </a>
+      <a href="/monitor/noise-events">
+        <strong>Noise Events</strong>
+        <span>AI가 의미 이벤트로 판단한 데이터만 확인</span>
+      </a>
+    </div>
+  </main>
+</body>
+</html>
+"""
+
+def render_monitor_table_page(title: str, subtitle: str, endpoint: str, table_id: str) -> str:
+    html = """
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>__TITLE__</title>
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; background: #f7f7f4; color: #171717; }
+    header { padding: 20px 28px 14px; border-bottom: 2px solid #111; background: #eee6d8; }
+    h1 { margin: 0; font-size: 28px; }
+    main { padding: 22px 28px 36px; }
+    nav { margin-bottom: 16px; }
+    nav a { color: #111; font-weight: 700; }
+    .toolbar { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; font-size: 14px; }
+    .status { font-weight: 700; }
+    .subtitle { margin: 8px 0 0; color: #555; }
+    .table-wrap { overflow: auto; border: 1px solid #d1d1ca; background: white; }
+    table { width: 100%; min-width: 1100px; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 9px 10px; border-bottom: 1px solid #e6e6df; text-align: left; white-space: nowrap; }
+    th { position: sticky; top: 0; background: #222; color: white; font-weight: 700; }
+    tr:nth-child(even) td { background: #fafafa; }
+    .empty, .error { padding: 16px; border: 1px solid #d1d1ca; background: white; }
+    .error { color: #b42318; }
+    code { background: #ecece7; padding: 2px 5px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>__TITLE__</h1>
+    <p class="subtitle">__SUBTITLE__</p>
+  </header>
+  <main>
+    <nav><a href="/monitor">Back to Monitor</a></nav>
+    <div class="toolbar">
+      <span class="status" id="status">Loading...</span>
+      <span>Auto refresh: 2s</span>
+      <span>Endpoint: <code>__ENDPOINT__</code></span>
+    </div>
+    <div id="__TABLE_ID__"></div>
+  </main>
+
+  <script>
+    const formatValue = (value) => {
+      if (value === null || value === undefined) return "";
+      if (typeof value === "number") return Number.isInteger(value) ? String(value) : value.toFixed(3);
+      if (typeof value === "boolean") return value ? "true" : "false";
+      return String(value);
+    };
+
+    const renderTable = (targetId, columns, rows) => {
+      const target = document.getElementById(targetId);
+      if (!rows || rows.length === 0) {
+        target.innerHTML = '<div class="empty">No data</div>';
+        return;
+      }
+
+      const thead = '<thead><tr>' + columns.map((col) => `<th>${col}</th>`).join("") + '</tr></thead>';
+      const tbody = '<tbody>' + rows.map((row) => {
+        return '<tr>' + row.map((value) => `<td>${formatValue(value)}</td>`).join("") + '</tr>';
+      }).join("") + '</tbody>';
+      target.innerHTML = `<div class="table-wrap"><table>${thead}${tbody}</table></div>`;
+    };
+
+    const load = async () => {
+      const status = document.getElementById("status");
+      try {
+        const response = await fetch("__ENDPOINT__?limit=50");
+        if (!response.ok) throw new Error("API request failed");
+        const data = await response.json();
+        renderTable("__TABLE_ID__", data.columns, data.rows);
+        status.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      } catch (error) {
+        status.textContent = "Load failed";
+        document.getElementById("__TABLE_ID__").innerHTML = `<div class="error">${error}</div>`;
+      }
+    };
+
+    load();
+    setInterval(load, 2000);
+  </script>
+</body>
+</html>
+"""
+    return (
+        html
+        .replace("__TITLE__", title)
+        .replace("__SUBTITLE__", subtitle)
+        .replace("__ENDPOINT__", endpoint)
+        .replace("__TABLE_ID__", table_id)
+    )
+
+@app.get("/monitor/readings", response_class=HTMLResponse)
+def monitor_readings_page():
+    return render_monitor_table_page(
+        title="All Sensor Readings",
+        subtitle="raw_sensor_readings에 저장된 모든 원본 센서 수신값",
+        endpoint="/api/v1/sensor-readings/recent",
+        table_id="readings"
+    )
+
+@app.get("/monitor/noise-events", response_class=HTMLResponse)
+def monitor_noise_events_page():
+    return render_monitor_table_page(
+        title="Noise Events",
+        subtitle="AI가 is_meaningful=true로 판단해 noise_events에 저장한 이벤트",
+        endpoint="/api/v1/noise-events/recent",
+        table_id="events"
+    )
+
 @app.get("/api/v1/dashboard/stats", response_model=DashboardStats)
 def get_dashboard_stats(db: Session = Depends(get_db)):
     total = db.query(models.Sensor).count()
@@ -300,20 +616,17 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
     # 2. KST 기준 야간 판정
     is_night = is_night_kst(sensor_timestamp)
 
-    # 3. classify_event
-    classification = classify_event(
-        sound_level=data.sound_level,
-        vibration_value=data.vibration_value,
-        duration_ms=data.duration_ms,
-        timestamp=sensor_timestamp
+    # 3. AI 이벤트 분류 API 호출
+    classification = classify_event_with_ai(
+        data=data,
+        sensor_timestamp=sensor_timestamp,
+        is_night=is_night,
+        household_id=sensor.household_id,
+        db=db
     )
-    classification["is_night"] = is_night  # KST 야간 판정으로 덮어쓰기
 
-    # 4. is_meaningful 판정
-    is_meaningful = (
-        classification["event_type"] != "background_noise" or
-        classification["severity"] in ["medium", "high"]
-    )
+    # 4. AI가 의미 있는 이벤트로 판단한 경우만 noise_events 저장
+    is_meaningful = classification["is_meaningful"]
 
     # 5. noise_events 저장 (의미 이벤트만)
     noise_event = None
@@ -355,8 +668,19 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
     db.add(new_log)
     db.flush()
 
-    # 7. analyze_patterns (noise_events 기반)
-    pattern_result = analyze_patterns(sensor.household_id, db)
+    # 7. 의미 이벤트가 저장된 경우에만 AI 패턴 분석 API 호출
+    if is_meaningful:
+        pattern_result = analyze_patterns_with_ai(sensor.household_id, db)
+        noise_event.pattern_label = pattern_result.get("pattern_label")
+    else:
+        pattern_result = {
+            "recent_count_10min": 0,
+            "pattern_label": "background",
+            "needs_mediation": False,
+            "needs_escalation": False,
+            "summary": "의미 이벤트가 아니므로 패턴 분석을 생략했습니다.",
+            "source": classification.get("source")
+        }
 
     message_created = False
     ai_result = None
@@ -435,9 +759,156 @@ def get_recent_noise_logs(since: Optional[datetime] = None, db: Session = Depend
     logs = query.limit(20).all()
     return {"logs": logs}
 
+@app.get("/api/v1/sensor-readings/recent")
+def get_recent_sensor_readings(
+    household_id: Optional[int] = None,
+    limit: int = 20,
+    db: Session = Depends(get_db)
+):
+    """최근 원본 센서 수신값을 테이블 형태로 조회"""
+    safe_limit = min(max(limit, 1), 100)
+    query = db.query(models.RawSensorReading).order_by(models.RawSensorReading.received_at.desc())
+    if household_id:
+        query = query.filter(models.RawSensorReading.household_id == household_id)
+    readings = query.limit(safe_limit).all()
+
+    columns = [
+        "id",
+        "sensor_id",
+        "household_id",
+        "sound_level",
+        "vibration_value",
+        "duration_ms",
+        "acceleration_x",
+        "acceleration_y",
+        "acceleration_z",
+        "received_at",
+        "sensor_timestamp"
+    ]
+    rows = [
+        [
+            reading.id,
+            reading.sensor_id,
+            reading.household_id,
+            reading.sound_level,
+            reading.vibration_value,
+            reading.duration_ms,
+            reading.acceleration_x,
+            reading.acceleration_y,
+            reading.acceleration_z,
+            format_kst(reading.received_at),
+            format_kst(reading.sensor_timestamp)
+        ]
+        for reading in readings
+    ]
+
+    return {
+        "columns": columns,
+        "rows": rows,
+        "readings": [
+            dict(zip(columns, row))
+            for row in rows
+        ],
+        "total": len(rows)
+    }
+
+@app.get("/api/v1/noise-events/recent")
+def get_recent_noise_events_api(
+    household_id: Optional[int] = None,
+    limit: int = 20,
+    db: Session = Depends(get_db)
+):
+    """AI가 의미 있는 이벤트로 판단해 noise_events에 저장된 최근 이벤트를 테이블 형태로 조회"""
+    safe_limit = min(max(limit, 1), 100)
+    query = db.query(models.NoiseEvent).order_by(models.NoiseEvent.started_at.desc())
+    if household_id:
+        query = query.filter(models.NoiseEvent.household_id == household_id)
+    events = query.limit(safe_limit).all()
+
+    columns = [
+        "id",
+        "sensor_id",
+        "household_id",
+        "event_type",
+        "severity",
+        "severity_score",
+        "confidence",
+        "is_night",
+        "is_meaningful",
+        "pattern_label",
+        "avg_sound_level",
+        "max_sound_level",
+        "avg_vibration",
+        "duration_ms",
+        "sample_count",
+        "started_at",
+        "ended_at",
+        "status"
+    ]
+    rows = [
+        [
+            event.id,
+            event.sensor_id,
+            event.household_id,
+            event.event_type,
+            event.severity,
+            event.severity_score,
+            event.confidence,
+            event.is_night,
+            event.is_meaningful,
+            event.pattern_label,
+            event.avg_sound_level,
+            event.max_sound_level,
+            event.avg_vibration,
+            event.duration_ms,
+            event.sample_count,
+            format_kst(event.started_at),
+            format_kst(event.ended_at),
+            event.status
+        ]
+        for event in events
+    ]
+
+    return {
+        "columns": columns,
+        "rows": rows,
+        "events": [
+            dict(zip(columns, row))
+            for row in rows
+        ],
+        "total": len(rows)
+    }
+
+@app.get("/api/v1/noise-events/{event_id}")
+def get_noise_event(event_id: int, db: Session = Depends(get_db)):
+    event = db.query(models.NoiseEvent).filter(models.NoiseEvent.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="소음 이벤트를 찾을 수 없습니다.")
+
+    return {
+        "id": event.id,
+        "sensor_id": event.sensor_id,
+        "household_id": event.household_id,
+        "event_type": event.event_type,
+        "severity": event.severity,
+        "severity_score": event.severity_score,
+        "confidence": event.confidence,
+        "is_night": event.is_night,
+        "is_meaningful": event.is_meaningful,
+        "pattern_label": event.pattern_label,
+        "avg_sound_level": event.avg_sound_level,
+        "max_sound_level": event.max_sound_level,
+        "avg_vibration": event.avg_vibration,
+        "duration_ms": event.duration_ms,
+        "sample_count": event.sample_count,
+        "started_at": event.started_at,
+        "ended_at": event.ended_at,
+        "status": event.status
+    }
+
 @app.get("/api/v1/households/{household_id}/patterns")
 def get_household_patterns(household_id: int, db: Session = Depends(get_db)):
-    pattern_result = analyze_patterns(household_id, db)
+    pattern_result = analyze_patterns_with_ai(household_id, db)
     return pattern_result
 
 @app.get("/api/v1/mediations", response_model=List[MediationResponse])
@@ -1214,19 +1685,17 @@ def get_completed_actions(db: Session = Depends(get_db)):
     ], "total": len(mediations)}
 
 @app.get("/api/v1/dashboard/hourly")
-def get_hourly_stats(db: Session = Depends(get_db)):
-    """최근 24시간 시간대별 소음 발생 현황"""
-    from datetime import timedelta
+def get_hourly_stats(hours: int = 24, db: Session = Depends(get_db)):
     now = datetime.now()
-    since = now - timedelta(hours=24)
+    since = now - timedelta(hours=hours)
 
     logs = db.query(models.NoiseLog).filter(
         models.NoiseLog.timestamp >= since
     ).all()
 
     hourly = {}
-    for i in range(24):
-        hour = (now - timedelta(hours=23-i)).hour
+    for i in range(hours):
+        hour = (now - timedelta(hours=hours-1-i)).hour
         hourly[f"{hour:02d}"] = {"total": 0, "high": 0, "night": 0}
 
     for log in logs:
@@ -1238,5 +1707,5 @@ def get_hourly_stats(db: Session = Depends(get_db)):
             if log.is_night:
                 hourly[hour_key]["night"] += 1
 
-    return {"hourly": hourly, "period": "최근 24시간"}
+    return {"hourly": hourly, "period": f"최근 {hours}시간"}
 
