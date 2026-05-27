@@ -2234,3 +2234,26 @@ def update_password(data: PasswordUpdate, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "success", "message": "비밀번호가 변경되었습니다."}
 
+class HouseholdUpdate(BaseModel):
+    building_name: Optional[str] = None
+    unit_number: Optional[str] = None
+    floor: Optional[int] = None
+    alias: Optional[str] = None
+
+@app.patch("/api/v1/households/{household_id}")
+def update_household(household_id: int, data: HouseholdUpdate, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(models.Household.id == household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+    if data.building_name:
+        household.building_name = data.building_name
+    if data.unit_number:
+        household.unit_number = data.unit_number
+    if data.floor:
+        household.floor = data.floor
+    if data.alias:
+        household.alias = data.alias
+    db.commit()
+    db.refresh(household)
+    return {"status": "success", "household_id": household_id}
+
