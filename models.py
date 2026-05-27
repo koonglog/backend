@@ -34,6 +34,7 @@ class Household(Base):
     last_login_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
+
 # 관리자 테이블
 class Admin(Base):
     __tablename__ = "admins"
