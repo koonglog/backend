@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -27,7 +28,13 @@ load_dotenv()
 load_dotenv(dotenv_path="/Users/ijiho/backend/.env")
 ENABLE_OPENAI = os.getenv("ENABLE_OPENAI", "false").lower() == "true"
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if ENABLE_OPENAI else None
-AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://10.118.65.207:8001")
+AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "https://ai-production-a761.up.railway.app")
+DEFAULT_CORS_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000"
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOWED_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
+    if origin.strip()
+]
 DEFAULT_ADMIN_EMAIL = os.getenv("DEFAULT_ADMIN_EMAIL", "admin@koonglog.com")
 DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD", "admin1234")
 
@@ -113,8 +120,17 @@ def ensure_sqlite_schema():
                 row[1] for row in conn.exec_driver_sql("PRAGMA table_info(households)").fetchall()
             }
             household_column_sql = {
+                "username": "ALTER TABLE households ADD COLUMN username VARCHAR",
+                "email": "ALTER TABLE households ADD COLUMN email VARCHAR",
+                "password_hash": "ALTER TABLE households ADD COLUMN password_hash VARCHAR",
+                "apartment_name": "ALTER TABLE households ADD COLUMN apartment_name VARCHAR",
                 "resident_name": "ALTER TABLE households ADD COLUMN resident_name VARCHAR",
                 "phone_number": "ALTER TABLE households ADD COLUMN phone_number VARCHAR",
+                "quiet_start_time": "ALTER TABLE households ADD COLUMN quiet_start_time VARCHAR",
+                "quiet_end_time": "ALTER TABLE households ADD COLUMN quiet_end_time VARCHAR",
+                "is_active": "ALTER TABLE households ADD COLUMN is_active BOOLEAN DEFAULT 1",
+                "last_login_at": "ALTER TABLE households ADD COLUMN last_login_at DATETIME",
+                "created_at": "ALTER TABLE households ADD COLUMN created_at DATETIME",
             }
             for column_name, sql in household_column_sql.items():
                 if column_name not in household_columns:
@@ -153,12 +169,46 @@ db_init = next(get_db())
 
 if db_init.query(models.Household).count() == 0:
     households = [
-        models.Household(building_name="A동", unit_number="101호", floor=1, alias="A-101", resident_name="김철수", phone_number="010-1234-5678"),
-        models.Household(building_name="A동", unit_number="201호", floor=2, alias="A-201", resident_name="이영희", phone_number="010-2345-6789"),
-        models.Household(building_name="B동", unit_number="102호", floor=1, alias="B-102", resident_name="박민수", phone_number="010-3456-7890"),
+        models.Household(username="aster03", email="aster03@koonglog.com", password_hash=hash_password("resident1234"), apartment_name="쿵로그아파트", building_name="A동", unit_number="101호", floor=1, alias="A-101", resident_name="김철수", phone_number="010-1234-5678", is_active=True),
+        models.Household(username="resident201", email="resident201@koonglog.com", password_hash=hash_password("resident1234"), apartment_name="쿵로그아파트", building_name="A동", unit_number="201호", floor=2, alias="A-201", resident_name="이영희", phone_number="010-2345-6789", is_active=True),
+        models.Household(username="resident102", email="resident102@koonglog.com", password_hash=hash_password("resident1234"), apartment_name="쿵로그아파트", building_name="B동", unit_number="102호", floor=1, alias="B-102", resident_name="박민수", phone_number="010-3456-7890", is_active=True),
     ]
     db_init.add_all(households)
     db_init.commit()
+else:
+    seed_households = db_init.query(models.Household).order_by(models.Household.id.asc()).all()
+    changed = False
+    default_usernames = ["aster03", "resident201", "resident102"]
+    default_emails = ["aster03@koonglog.com", "resident201@koonglog.com", "resident102@koonglog.com"]
+    default_residents = [
+        ("김철수", "010-1234-5678"),
+        ("이영희", "010-2345-6789"),
+        ("박민수", "010-3456-7890"),
+    ]
+    for index, household in enumerate(seed_households[:3]):
+        if not household.username:
+            household.username = default_usernames[index]
+            changed = True
+        if not household.email:
+            household.email = default_emails[index]
+            changed = True
+        if not household.password_hash:
+            household.password_hash = hash_password("resident1234")
+            changed = True
+        if not household.apartment_name:
+            household.apartment_name = "쿵로그아파트"
+            changed = True
+        if not household.resident_name:
+            household.resident_name = default_residents[index][0]
+            changed = True
+        if not household.phone_number:
+            household.phone_number = default_residents[index][1]
+            changed = True
+        if household.is_active is None:
+            household.is_active = True
+            changed = True
+    if changed:
+        db_init.commit()
 
 if db_init.query(models.Sensor).count() == 0:
     test_sensors = [
@@ -213,6 +263,14 @@ else:
 
 
 app = FastAPI(title="쿵로그(KungLog) AI 통합 서버")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 # --- Pydantic 스키마 ---
 
@@ -300,6 +358,60 @@ class BasicStatusResponse(BaseModel):
     status: str
     message: str
 
+class ResidentSummary(BaseModel):
+    household_id: int
+    username: Optional[str] = None
+    email: Optional[str] = None
+    apartment_name: Optional[str] = None
+    resident_name: Optional[str] = None
+    phone_number: Optional[str] = None
+    building_name: str
+    unit_number: str
+    floor: int
+    alias: str
+    quiet_start_time: Optional[str] = None
+    quiet_end_time: Optional[str] = None
+
+class ResidentLoginRequest(BaseModel):
+    username: str
+    password: str
+
+class ResidentLoginResponse(BaseModel):
+    status: str
+    access_token: str
+    token_type: str = "bearer"
+    resident: ResidentSummary
+
+class ResidentRegisterRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    resident_name: str
+    phone_number: Optional[str] = None
+    apartment_name: str
+    building_name: str
+    unit_number: str
+    floor: int
+    alias: Optional[str] = None
+    quiet_start_time: Optional[str] = None
+    quiet_end_time: Optional[str] = None
+    terms_agreed: bool
+    privacy_agreed: bool
+
+class ResidentFindIdRequest(BaseModel):
+    resident_name: str
+    phone_number: str
+
+class ResidentFindIdResponse(BaseModel):
+    status: str
+    username: str
+
+class ResidentPasswordResetRequest(BaseModel):
+    username: str
+    resident_name: str
+    phone_number: str
+    new_password: str
+
 def serialize_admin(admin: models.Admin) -> dict:
     return {
         "id": admin.id,
@@ -316,6 +428,25 @@ def serialize_admin(admin: models.Admin) -> dict:
 
 def normalize_email(email: str) -> str:
     return email.strip().lower()
+
+def normalize_username(username: str) -> str:
+    return username.strip()
+
+def serialize_resident(household: models.Household) -> dict:
+    return {
+        "household_id": household.id,
+        "username": household.username,
+        "email": household.email,
+        "apartment_name": household.apartment_name,
+        "resident_name": household.resident_name,
+        "phone_number": household.phone_number,
+        "building_name": household.building_name,
+        "unit_number": household.unit_number,
+        "floor": household.floor,
+        "alias": household.alias,
+        "quiet_start_time": household.quiet_start_time,
+        "quiet_end_time": household.quiet_end_time,
+    }
 
 # --- 관리자 인증 API ---
 
@@ -393,6 +524,89 @@ def reset_admin_password(data: PasswordResetRequest, db: Session = Depends(get_d
     if not admin:
         raise HTTPException(status_code=404, detail="일치하는 관리자 계정을 찾을 수 없습니다.")
     admin.password_hash = hash_password(data.new_password)
+    db.commit()
+    return {"status": "success", "message": "비밀번호가 변경되었습니다."}
+
+# --- 입주민 인증 API ---
+
+@app.post("/api/v1/residents/auth/login", response_model=ResidentLoginResponse)
+def login_resident(data: ResidentLoginRequest, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(
+        models.Household.username == normalize_username(data.username)
+    ).first()
+    if not household or not household.is_active or not verify_password(data.password, household.password_hash):
+        raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 올바르지 않습니다.")
+
+    household.last_login_at = datetime.utcnow()
+    db.commit()
+    db.refresh(household)
+
+    return {
+        "status": "success",
+        "access_token": create_access_token(household.id, household.username or household.alias),
+        "token_type": "bearer",
+        "resident": serialize_resident(household)
+    }
+
+@app.post("/api/v1/residents/auth/register", response_model=ResidentLoginResponse)
+def register_resident(data: ResidentRegisterRequest, db: Session = Depends(get_db)):
+    username = normalize_username(data.username)
+    email = normalize_email(data.email)
+    if not data.terms_agreed or not data.privacy_agreed:
+        raise HTTPException(status_code=400, detail="필수 약관에 동의해야 회원가입할 수 있습니다.")
+    if db.query(models.Household).filter(models.Household.username == username).first():
+        raise HTTPException(status_code=409, detail="이미 사용 중인 아이디입니다.")
+    if db.query(models.Household).filter(models.Household.email == email).first():
+        raise HTTPException(status_code=409, detail="이미 사용 중인 이메일입니다.")
+
+    alias = data.alias or f"{data.apartment_name} {data.building_name} {data.unit_number}"
+    household = models.Household(
+        username=username,
+        email=email,
+        password_hash=hash_password(data.password),
+        resident_name=data.resident_name,
+        phone_number=data.phone_number,
+        apartment_name=data.apartment_name,
+        building_name=data.building_name,
+        unit_number=data.unit_number,
+        floor=data.floor,
+        alias=alias,
+        quiet_start_time=data.quiet_start_time,
+        quiet_end_time=data.quiet_end_time,
+        is_active=True,
+        last_login_at=datetime.utcnow()
+    )
+    db.add(household)
+    db.commit()
+    db.refresh(household)
+
+    return {
+        "status": "success",
+        "access_token": create_access_token(household.id, household.username or household.alias),
+        "token_type": "bearer",
+        "resident": serialize_resident(household)
+    }
+
+@app.post("/api/v1/residents/auth/find-id", response_model=ResidentFindIdResponse)
+def find_resident_id(data: ResidentFindIdRequest, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(
+        models.Household.resident_name == data.resident_name,
+        models.Household.phone_number == data.phone_number
+    ).first()
+    if not household or not household.username:
+        raise HTTPException(status_code=404, detail="일치하는 입주민 계정을 찾을 수 없습니다.")
+    return {"status": "success", "username": household.username}
+
+@app.post("/api/v1/residents/auth/reset-password", response_model=BasicStatusResponse)
+def reset_resident_password(data: ResidentPasswordResetRequest, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(
+        models.Household.username == normalize_username(data.username),
+        models.Household.resident_name == data.resident_name,
+        models.Household.phone_number == data.phone_number
+    ).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="일치하는 입주민 계정을 찾을 수 없습니다.")
+    household.password_hash = hash_password(data.new_password)
     db.commit()
     return {"status": "success", "message": "비밀번호가 변경되었습니다."}
 
@@ -1172,12 +1386,30 @@ def get_mediations(status: Optional[str] = None, db: Session = Depends(get_db)):
         query = query.filter(models.Mediation.status == status)
     return query.all()
 
-@app.get("/api/v1/mediations/{med_id}", response_model=MediationResponse)
+
+@app.get("/api/v1/mediations/{med_id}")
 def get_mediation(med_id: int, db: Session = Depends(get_db)):
     med = db.query(models.Mediation).filter(models.Mediation.id == med_id).first()
     if not med:
         raise HTTPException(status_code=404, detail="해당 중재 정보를 찾을 수 없습니다.")
-    return med
+
+    household = db.query(models.Household).filter(models.Household.id == med.household_id).first()
+
+    result = {
+        "id": med.id,
+        "target_unit": med.target_unit,
+        "ai_message": med.ai_message,
+        "event_summary": med.event_summary,
+        "resident_message": med.resident_message,
+        "admin_summary": med.admin_summary,
+        "recommended_action": med.recommended_action,
+        "generation_method": med.generation_method,
+        "status": med.status,
+        "created_at": med.created_at,
+        "quiet_start_time": household.quiet_start_time if household else None,
+        "quiet_end_time": household.quiet_end_time if household else None
+    }
+    return result
 
 @app.patch("/api/v1/mediations/{med_id}", response_model=MediationResponse)
 def update_mediation_status(med_id: int, data: MediationUpdate, db: Session = Depends(get_db)):
@@ -1193,6 +1425,35 @@ def update_mediation_status(med_id: int, data: MediationUpdate, db: Session = De
     db.commit()
     db.refresh(med)
     return med
+
+@app.get("/api/v1/residents/{household_id}/mediations")
+def get_resident_mediations(household_id: int, status: Optional[str] = None, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(models.Household.id == household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+
+    query = db.query(models.Mediation).filter(
+        models.Mediation.household_id == household_id
+    ).order_by(models.Mediation.created_at.desc())
+    if status:
+        query = query.filter(models.Mediation.status == status)
+
+    mediations = query.all()
+    return {
+        "mediations": [
+            {
+                "id": mediation.id,
+                "target_unit": mediation.target_unit,
+                "resident_message": mediation.resident_message,
+                "event_summary": mediation.event_summary,
+                "recommended_action": mediation.recommended_action,
+                "status": mediation.status,
+                "created_at": mediation.created_at
+            }
+            for mediation in mediations
+        ],
+        "total": len(mediations)
+    }
 
 @app.get("/api/v1/admin/cases")
 def get_admin_cases(db: Session = Depends(get_db)):
@@ -1273,6 +1534,43 @@ def get_notice(notice_id: int, db: Session = Depends(get_db)):
     if not notice:
         raise HTTPException(status_code=404, detail="공지사항을 찾을 수 없습니다.")
     return notice
+
+@app.get("/api/v1/residents/{household_id}/notices")
+def get_resident_notices(household_id: int, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(models.Household.id == household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+
+    notices = db.query(models.Notice).order_by(models.Notice.created_at.desc()).all()
+    visible_notices = []
+    for notice in notices:
+        if notice.target_type in ["all", "전체", "all_households"]:
+            visible_notices.append(notice)
+            continue
+        if not notice.target_households:
+            continue
+        try:
+            target_households = json.loads(notice.target_households)
+        except json.JSONDecodeError:
+            target_households = []
+        if household_id in target_households or str(household_id) in target_households:
+            visible_notices.append(notice)
+
+    return {
+        "notices": [
+            {
+                "id": notice.id,
+                "title": notice.title,
+                "content": notice.content,
+                "notice_type": notice.notice_type,
+                "status": notice.status,
+                "created_at": notice.created_at,
+                "sent_at": notice.sent_at
+            }
+            for notice in visible_notices
+        ],
+        "total": len(visible_notices)
+    }
 
 @app.delete("/api/v1/notices/{notice_id}")
 def delete_notice(notice_id: int, db: Session = Depends(get_db)):
@@ -2128,6 +2426,152 @@ def create_mediation_request(data: MediationCreateRequest, db: Session = Depends
         "mediation_id": new_med.id,
         "ai_message": msg["ai_message"]
     }
+<<<<<<< HEAD
+
+@app.get("/api/v1/households/{household_id}/summary")
+def get_household_summary(household_id: int, db: Session = Depends(get_db)):
+    today = date.today()
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+
+    # 오늘 충격 소음 횟수
+    today_impact = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id,
+        func.date(models.NoiseLog.timestamp) == today,
+        models.NoiseLog.event_type == "impact_noise"
+    ).count()
+
+    # 7일 평균 충격 소음 횟수
+    week_logs = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id,
+        models.NoiseLog.timestamp >= seven_days_ago,
+        models.NoiseLog.event_type == "impact_noise"
+    ).count()
+    daily_avg = round(week_logs / 7, 1)
+    change_percent = round((today_impact - daily_avg) / daily_avg * 100, 1) if daily_avg > 0 else 0
+
+    # 최근 평균 강도
+    recent_logs = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id
+    ).order_by(models.NoiseLog.timestamp.desc()).limit(10).all()
+    avg_sound = round(sum(l.sound_level for l in recent_logs) / len(recent_logs), 1) if recent_logs else 0
+    is_caution = any(l.is_night for l in recent_logs)
+
+    # 최근 소음 패턴
+    night_count = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id,
+        models.NoiseLog.timestamp >= seven_days_ago,
+        models.NoiseLog.is_night == True
+    ).count()
+    pattern_label = "야간 반복 소음 주의" if night_count >= 3 else "정상"
+    pattern_desc = f"최근 7일간 인근 세대에서 소음이 반복적으로 감지되었어요" if night_count >= 3 else "최근 소음 패턴이 정상입니다"
+
+    # 최근 이벤트 로그
+    recent_events = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id
+    ).order_by(models.NoiseLog.timestamp.desc()).limit(4).all()
+
+    return {
+        "today_impact_count": today_impact,
+        "change_percent": change_percent,
+        "avg_sound_level": avg_sound,
+        "is_caution": is_caution,
+        "pattern_label": pattern_label,
+        "pattern_desc": pattern_desc,
+        "recent_events": [
+            {
+                "id": l.id,
+                "event_type": l.event_type,
+                "sound_level": l.sound_level,
+                "duration_ms": l.duration_ms,
+                "timestamp": l.timestamp
+            } for l in recent_events
+        ]
+    }
+# --- 주민 프로필 ---
+
+@app.get("/api/v1/households/{household_id}/profile")
+def get_household_profile(household_id: int, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(models.Household.id == household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+    return {
+        "household_id": household.id,
+        "resident_name": household.resident_name,
+        "building_name": household.building_name,
+        "unit_number": household.unit_number,
+        "floor": household.floor,
+        "alias": household.alias
+    }
+
+@app.delete("/api/v1/households/{household_id}/withdraw")
+def withdraw_household(household_id: int, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(models.Household.id == household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+    db.delete(household)
+    db.commit()
+    return {"status": "success", "message": "회원 탈퇴가 완료되었습니다."}
+
+@app.post("/api/v1/auth/logout")
+def logout():
+    return {"status": "success", "message": "로그아웃 되었습니다."}
+
+class PasswordUpdate(BaseModel):
+    admin_id: int
+    current_password: str
+    new_password: str
+
+@app.patch("/api/v1/auth/update-password")
+def update_password(data: PasswordUpdate, db: Session = Depends(get_db)):
+    admin = db.query(models.Admin).filter(models.Admin.id == data.admin_id).first()
+    if not admin:
+        raise HTTPException(status_code=404, detail="관리자를 찾을 수 없습니다.")
+    if admin.password != data.current_password:
+        raise HTTPException(status_code=400, detail="현재 비밀번호가 일치하지 않습니다.")
+    admin.password = data.new_password
+    db.commit()
+    return {"status": "success", "message": "비밀번호가 변경되었습니다."}
+
+class HouseholdUpdate(BaseModel):
+    building_name: Optional[str] = None
+    unit_number: Optional[str] = None
+    floor: Optional[int] = None
+    alias: Optional[str] = None
+
+@app.patch("/api/v1/households/{household_id}")
+def update_household(household_id: int, data: HouseholdUpdate, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(models.Household.id == household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+    if data.building_name:
+        household.building_name = data.building_name
+    if data.unit_number:
+        household.unit_number = data.unit_number
+    if data.floor:
+        household.floor = data.floor
+    if data.alias:
+        household.alias = data.alias
+    db.commit()
+    db.refresh(household)
+    return {"status": "success", "household_id": household_id}
+
+class QuietTimeUpdate(BaseModel):
+    quiet_start_time: str
+    quiet_end_time: str
+
+@app.patch("/api/v1/households/{household_id}/quiet-time")
+def update_quiet_time(household_id: int, data: QuietTimeUpdate, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(models.Household.id == household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+    household.quiet_start_time = data.quiet_start_time
+    household.quiet_end_time = data.quiet_end_time
+    db.commit()
+    db.refresh(household)
+    return {"status": "success", "quiet_start_time": data.quiet_start_time, "quiet_end_time": data.quiet_end_time}
+
+=======
+>>>>>>> feat/db-expand
 @app.get("/api/v1/households/{household_id}/home")
 def get_household_home(household_id: int, db: Session = Depends(get_db)):
     # 중재 진행 상태
