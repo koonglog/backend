@@ -2129,3 +2129,63 @@ def create_mediation_request(data: MediationCreateRequest, db: Session = Depends
         "mediation_id": new_med.id,
         "ai_message": msg["ai_message"]
     }
+
+@app.get("/api/v1/households/{household_id}/summary")
+def get_household_summary(household_id: int, db: Session = Depends(get_db)):
+    today = date.today()
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+
+    # 오늘 충격 소음 횟수
+    today_impact = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id,
+        func.date(models.NoiseLog.timestamp) == today,
+        models.NoiseLog.event_type == "impact_noise"
+    ).count()
+
+    # 7일 평균 충격 소음 횟수
+    week_logs = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id,
+        models.NoiseLog.timestamp >= seven_days_ago,
+        models.NoiseLog.event_type == "impact_noise"
+    ).count()
+    daily_avg = round(week_logs / 7, 1)
+    change_percent = round((today_impact - daily_avg) / daily_avg * 100, 1) if daily_avg > 0 else 0
+
+    # 최근 평균 강도
+    recent_logs = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id
+    ).order_by(models.NoiseLog.timestamp.desc()).limit(10).all()
+    avg_sound = round(sum(l.sound_level for l in recent_logs) / len(recent_logs), 1) if recent_logs else 0
+    is_caution = any(l.is_night for l in recent_logs)
+
+    # 최근 소음 패턴
+    night_count = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id,
+        models.NoiseLog.timestamp >= seven_days_ago,
+        models.NoiseLog.is_night == True
+    ).count()
+    pattern_label = "야간 반복 소음 주의" if night_count >= 3 else "정상"
+    pattern_desc = f"최근 7일간 인근 세대에서 소음이 반복적으로 감지되었어요" if night_count >= 3 else "최근 소음 패턴이 정상입니다"
+
+    # 최근 이벤트 로그
+    recent_events = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id
+    ).order_by(models.NoiseLog.timestamp.desc()).limit(4).all()
+
+    return {
+        "today_impact_count": today_impact,
+        "change_percent": change_percent,
+        "avg_sound_level": avg_sound,
+        "is_caution": is_caution,
+        "pattern_label": pattern_label,
+        "pattern_desc": pattern_desc,
+        "recent_events": [
+            {
+                "id": l.id,
+                "event_type": l.event_type,
+                "sound_level": l.sound_level,
+                "duration_ms": l.duration_ms,
+                "timestamp": l.timestamp
+            } for l in recent_events
+        ]
+    }
