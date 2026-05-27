@@ -31,15 +31,19 @@ class Admin(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=True)
+    password_hash = Column(String, nullable=True)
+    password = Column(String, nullable=True)
     name = Column(String)
+    office_name = Column(String, nullable=True)
+    office_address = Column(String, nullable=True)
+    phone_number = Column(String, nullable=True)
     role = Column(Enum(AdminRole), default=AdminRole.STAFF)
     team = Column(Enum(TeamType), default=TeamType.ADMIN)
     permission_level = Column(String)
-    email = Column(String, unique=True, nullable=True)        # 추가
-    password = Column(String, nullable=True)                  # 추가
-    office_name = Column(String, nullable=True)               # 추가
-    office_address = Column(String, nullable=True)            # 추가
-    created_at = Column(DateTime, server_default=func.now())  # 추가
+    is_active = Column(Boolean, default=True)
+    last_login_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
 
 # IoT 센서 테이블
 class Sensor(Base):

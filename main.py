@@ -6,9 +6,12 @@ from pydantic import BaseModel
 from datetime import datetime, date, timedelta, timezone
 from typing import List, Optional
 
+import base64
+import hashlib
 import json
 import math
 import requests
+import secrets
 
 import models
 from database import engine, get_db
@@ -25,6 +28,29 @@ load_dotenv(dotenv_path="/Users/ijiho/backend/.env")
 ENABLE_OPENAI = os.getenv("ENABLE_OPENAI", "false").lower() == "true"
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if ENABLE_OPENAI else None
 AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://10.118.65.207:8001")
+DEFAULT_ADMIN_EMAIL = os.getenv("DEFAULT_ADMIN_EMAIL", "admin@koonglog.com")
+DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD", "admin1234")
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100_000)
+    return f"pbkdf2_sha256${salt}${digest.hex()}"
+
+def verify_password(password: str, stored_hash: Optional[str]) -> bool:
+    if not stored_hash:
+        return False
+    try:
+        algorithm, salt, digest_hex = stored_hash.split("$", 2)
+    except ValueError:
+        return False
+    if algorithm != "pbkdf2_sha256":
+        return False
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100_000)
+    return secrets.compare_digest(digest.hex(), digest_hex)
+
+def create_access_token(admin_id: int, email: str) -> str:
+    payload = f"{admin_id}:{email}:{secrets.token_urlsafe(24)}"
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("utf-8")
 
 # DB 테이블 생성
 models.Base.metadata.create_all(bind=engine)
@@ -94,6 +120,25 @@ def ensure_sqlite_schema():
                 if column_name not in household_columns:
                     conn.exec_driver_sql(sql)
 
+        if "admins" in table_names:
+            admin_columns = {
+                row[1] for row in conn.exec_driver_sql("PRAGMA table_info(admins)").fetchall()
+            }
+            admin_column_sql = {
+                "email": "ALTER TABLE admins ADD COLUMN email VARCHAR",
+                "password_hash": "ALTER TABLE admins ADD COLUMN password_hash VARCHAR",
+                "password": "ALTER TABLE admins ADD COLUMN password VARCHAR",
+                "office_name": "ALTER TABLE admins ADD COLUMN office_name VARCHAR",
+                "office_address": "ALTER TABLE admins ADD COLUMN office_address VARCHAR",
+                "phone_number": "ALTER TABLE admins ADD COLUMN phone_number VARCHAR",
+                "is_active": "ALTER TABLE admins ADD COLUMN is_active BOOLEAN DEFAULT 1",
+                "last_login_at": "ALTER TABLE admins ADD COLUMN last_login_at DATETIME",
+                "created_at": "ALTER TABLE admins ADD COLUMN created_at DATETIME",
+            }
+            for column_name, sql in admin_column_sql.items():
+                if column_name not in admin_columns:
+                    conn.exec_driver_sql(sql)
+
         if "mediations" in table_names:
             mediation_columns = {
                 row[1] for row in conn.exec_driver_sql("PRAGMA table_info(mediations)").fetchall()
@@ -129,13 +174,42 @@ if db_init.query(models.Sensor).count() == 0:
 if db_init.query(models.Admin).count() == 0:
     admin = models.Admin(
         username="admin001",
+        email=DEFAULT_ADMIN_EMAIL,
+        password_hash=hash_password(DEFAULT_ADMIN_PASSWORD),
         name="김관리",
+        office_name="쿵로그 관리사무소",
+        office_address="서울시 쿵로그아파트",
+        phone_number="010-0000-0000",
         role="관리소장",
         team="관리팀",
-        permission_level="master"
+        permission_level="master",
+        is_active=True
     )
     db_init.add(admin)
     db_init.commit()
+else:
+    default_admin = db_init.query(models.Admin).order_by(models.Admin.id.asc()).first()
+    changed = False
+    if default_admin and not default_admin.email:
+        default_admin.email = DEFAULT_ADMIN_EMAIL
+        changed = True
+    if default_admin and not default_admin.password_hash:
+        default_admin.password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
+        changed = True
+    if default_admin and not default_admin.office_name:
+        default_admin.office_name = "쿵로그 관리사무소"
+        changed = True
+    if default_admin and not default_admin.office_address:
+        default_admin.office_address = "서울시 쿵로그아파트"
+        changed = True
+    if default_admin and not default_admin.phone_number:
+        default_admin.phone_number = "010-0000-0000"
+        changed = True
+    if default_admin and default_admin.is_active is None:
+        default_admin.is_active = True
+        changed = True
+    if changed:
+        db_init.commit()
 
 
 app = FastAPI(title="쿵로그(KungLog) AI 통합 서버")
@@ -176,6 +250,151 @@ class MediationUpdate(BaseModel):
     status: Optional[str] = None
     ai_message: Optional[str] = None
     resident_message: Optional[str] = None
+
+class AdminSummary(BaseModel):
+    id: int
+    username: str
+    email: Optional[str] = None
+    name: str
+    office_name: Optional[str] = None
+    office_address: Optional[str] = None
+    phone_number: Optional[str] = None
+    role: str
+    team: str
+    permission_level: str
+
+class AdminLoginRequest(BaseModel):
+    email: str
+    password: str
+
+class AdminLoginResponse(BaseModel):
+    status: str
+    access_token: str
+    token_type: str = "bearer"
+    admin: AdminSummary
+
+class AdminRegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: str
+    office_name: str
+    office_address: Optional[str] = None
+    phone_number: Optional[str] = None
+    username: Optional[str] = None
+    role: Optional[str] = "관리소장"
+
+class FindEmailRequest(BaseModel):
+    name: str
+    phone_number: str
+
+class FindEmailResponse(BaseModel):
+    status: str
+    email: str
+
+class PasswordResetRequest(BaseModel):
+    email: str
+    name: str
+    new_password: str
+
+class BasicStatusResponse(BaseModel):
+    status: str
+    message: str
+
+def serialize_admin(admin: models.Admin) -> dict:
+    return {
+        "id": admin.id,
+        "username": admin.username,
+        "email": admin.email,
+        "name": admin.name,
+        "office_name": admin.office_name,
+        "office_address": admin.office_address,
+        "phone_number": admin.phone_number,
+        "role": admin.role.value if hasattr(admin.role, "value") else admin.role,
+        "team": admin.team.value if hasattr(admin.team, "value") else admin.team,
+        "permission_level": admin.permission_level,
+    }
+
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+# --- 관리자 인증 API ---
+
+@app.post("/api/v1/auth/login", response_model=AdminLoginResponse)
+def login_admin(data: AdminLoginRequest, db: Session = Depends(get_db)):
+    admin = db.query(models.Admin).filter(models.Admin.email == normalize_email(data.email)).first()
+    if not admin or not admin.is_active or not verify_password(data.password, admin.password_hash):
+        raise HTTPException(status_code=401, detail="이메일 또는 비밀번호가 올바르지 않습니다.")
+
+    admin.last_login_at = datetime.utcnow()
+    db.commit()
+    db.refresh(admin)
+
+    return {
+        "status": "success",
+        "access_token": create_access_token(admin.id, admin.email or admin.username),
+        "token_type": "bearer",
+        "admin": serialize_admin(admin)
+    }
+
+@app.post("/api/v1/auth/register", response_model=AdminLoginResponse)
+def register_admin(data: AdminRegisterRequest, db: Session = Depends(get_db)):
+    email = normalize_email(data.email)
+    if db.query(models.Admin).filter(models.Admin.email == email).first():
+        raise HTTPException(status_code=409, detail="이미 등록된 이메일입니다.")
+
+    username = data.username or email.split("@")[0]
+    base_username = username
+    suffix = 1
+    while db.query(models.Admin).filter(models.Admin.username == username).first():
+        suffix += 1
+        username = f"{base_username}{suffix}"
+
+    admin = models.Admin(
+        username=username,
+        email=email,
+        password_hash=hash_password(data.password),
+        name=data.name,
+        office_name=data.office_name,
+        office_address=data.office_address,
+        phone_number=data.phone_number,
+        role=data.role or "관리소장",
+        team="관리팀",
+        permission_level="manager",
+        is_active=True,
+        last_login_at=datetime.utcnow()
+    )
+    db.add(admin)
+    db.commit()
+    db.refresh(admin)
+
+    return {
+        "status": "success",
+        "access_token": create_access_token(admin.id, admin.email or admin.username),
+        "token_type": "bearer",
+        "admin": serialize_admin(admin)
+    }
+
+@app.post("/api/v1/auth/find-email", response_model=FindEmailResponse)
+def find_admin_email(data: FindEmailRequest, db: Session = Depends(get_db)):
+    admin = db.query(models.Admin).filter(
+        models.Admin.name == data.name,
+        models.Admin.phone_number == data.phone_number
+    ).first()
+    if not admin or not admin.email:
+        raise HTTPException(status_code=404, detail="일치하는 관리자 계정을 찾을 수 없습니다.")
+    return {"status": "success", "email": admin.email}
+
+@app.post("/api/v1/auth/reset-password", response_model=BasicStatusResponse)
+def reset_admin_password(data: PasswordResetRequest, db: Session = Depends(get_db)):
+    admin = db.query(models.Admin).filter(
+        models.Admin.email == normalize_email(data.email),
+        models.Admin.name == data.name
+    ).first()
+    if not admin:
+        raise HTTPException(status_code=404, detail="일치하는 관리자 계정을 찾을 수 없습니다.")
+    admin.password_hash = hash_password(data.new_password)
+    db.commit()
+    return {"status": "success", "message": "비밀번호가 변경되었습니다."}
 
 # --- AI 연동 로직 ---
 
@@ -1850,43 +2069,3 @@ def get_schedule_overlap(med_id: int, db: Session = Depends(get_db)):
         "total_responses": len(schedules)
     }
 
-
-# --- 인증 ---
-
-class AdminRegisterRequest(BaseModel):
-    username: str
-    name: str
-    email: str
-    password: str
-    role: str
-    office_name: str
-    office_address: str
-
-
-@app.post("/api/v1/auth/register")
-def register_admin(data: AdminRegisterRequest, db: Session = Depends(get_db)):
-    # 이메일 중복 체크
-    existing = db.query(models.Admin).filter(models.Admin.email == data.email).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="이미 사용 중인 이메일입니다.")
-
-    # username 중복 체크
-    existing_username = db.query(models.Admin).filter(models.Admin.username == data.username).first()
-    if existing_username:
-        raise HTTPException(status_code=400, detail="이미 사용 중인 아이디입니다.")
-
-    new_admin = models.Admin(
-        username=data.username,
-        name=data.name,
-        email=data.email,
-        password=data.password,
-        role=data.role,
-        team="관리팀",
-        permission_level="staff",
-        office_name=data.office_name,
-        office_address=data.office_address
-    )
-    db.add(new_admin)
-    db.commit()
-    db.refresh(new_admin)
-    return {"status": "success", "admin_id": new_admin.id}
