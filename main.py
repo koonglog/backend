@@ -1828,3 +1828,44 @@ def get_schedule_overlap(med_id: int, db: Session = Depends(get_db)):
         "overlap_counts": overlap_counts,
         "total_responses": len(schedules)
     }
+
+
+# --- 인증 ---
+
+class AdminRegisterRequest(BaseModel):
+    username: str
+    name: str
+    email: str
+    password: str
+    role: str
+    office_name: str
+    office_address: str
+
+
+@app.post("/api/v1/auth/register")
+def register_admin(data: AdminRegisterRequest, db: Session = Depends(get_db)):
+    # 이메일 중복 체크
+    existing = db.query(models.Admin).filter(models.Admin.email == data.email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="이미 사용 중인 이메일입니다.")
+
+    # username 중복 체크
+    existing_username = db.query(models.Admin).filter(models.Admin.username == data.username).first()
+    if existing_username:
+        raise HTTPException(status_code=400, detail="이미 사용 중인 아이디입니다.")
+
+    new_admin = models.Admin(
+        username=data.username,
+        name=data.name,
+        email=data.email,
+        password=data.password,
+        role=data.role,
+        team="관리팀",
+        permission_level="staff",
+        office_name=data.office_name,
+        office_address=data.office_address
+    )
+    db.add(new_admin)
+    db.commit()
+    db.refresh(new_admin)
+    return {"status": "success", "admin_id": new_admin.id}
