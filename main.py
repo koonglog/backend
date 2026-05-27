@@ -2257,3 +2257,18 @@ def update_household(household_id: int, data: HouseholdUpdate, db: Session = Dep
     db.refresh(household)
     return {"status": "success", "household_id": household_id}
 
+class QuietTimeUpdate(BaseModel):
+    quiet_start_time: str
+    quiet_end_time: str
+
+@app.patch("/api/v1/households/{household_id}/quiet-time")
+def update_quiet_time(household_id: int, data: QuietTimeUpdate, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(models.Household.id == household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+    household.quiet_start_time = data.quiet_start_time
+    household.quiet_end_time = data.quiet_end_time
+    db.commit()
+    db.refresh(household)
+    return {"status": "success", "quiet_start_time": data.quiet_start_time, "quiet_end_time": data.quiet_end_time}
+

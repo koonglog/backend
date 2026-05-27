@@ -24,6 +24,8 @@ class Household(Base):
     alias = Column(String)
     resident_name = Column(String, nullable=True)   # 추가
     phone_number = Column(String, nullable=True)    # 추가
+    quiet_start_time = Column(String, nullable=True)  # 추가
+    quiet_end_time = Column(String, nullable=True)  # 추가
 
 # 관리자 테이블
 class Admin(Base):
