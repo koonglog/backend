@@ -5,9 +5,9 @@ from database import Base
 
 class AdminRole(str, enum.Enum):
     MANAGER = "관리소장"
-    TECHNICAL = "시설과장"
-    SECURITY = "보안팀장"
     STAFF = "관리원"
+    TECHNICAL = "기술팀"
+    SECURITY = "보안팀"
 
 class TeamType(str, enum.Enum):
     ADMIN = "관리팀"
