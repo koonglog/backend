@@ -1008,28 +1008,42 @@ def monitor_noise_events_page():
         table_id="events"
     )
 
-@app.get("/api/v1/dashboard/stats", response_model=DashboardStats)
+
+@app.get("/api/v1/dashboard/stats")
 def get_dashboard_stats(db: Session = Depends(get_db)):
-    total = db.query(models.Sensor).count()
-    online = db.query(models.Sensor).filter(models.Sensor.is_online == True).count()
-    avg_battery = db.query(func.avg(models.Sensor.battery_level)).scalar() or 0
     today = date.today()
-    warning_count = db.query(models.NoiseLog).filter(
-        func.date(models.NoiseLog.timestamp) == today,
-        models.NoiseLog.sound_level > 40
+
+    # 모니터링 세대 수
+    total_households = db.query(models.Household).count()
+
+    # 긴급 대응 필요 세대 수
+    households = db.query(models.Household).all()
+    urgent_count = 0
+    for household in households:
+        logs_today = db.query(models.NoiseLog).filter(
+            models.NoiseLog.household_id == household.id,
+            func.date(models.NoiseLog.timestamp) == today
+        ).all()
+        total_today = len(logs_today)
+        high_today = sum(1 for l in logs_today if l.severity == "high")
+        if total_today >= 7 or high_today >= 3:
+            urgent_count += 1
+
+    # 오늘 발생 소음 총합
+    today_noise_count = db.query(models.NoiseLog).filter(
+        func.date(models.NoiseLog.timestamp) == today
     ).count()
-    recent_avg_db = db.query(func.avg(models.NoiseLog.sound_level)).filter(
-        models.NoiseLog.id.in_(
-            db.query(models.NoiseLog.id).order_by(models.NoiseLog.timestamp.desc()).limit(100)
-        )
-    ).scalar() or 0
+
+    # 조치 완료 세대 수
+    completed_count = db.query(models.Mediation).filter(
+        models.Mediation.status == "completed"
+    ).count()
 
     return {
-        "total_sensors": total,
-        "online_sensors": online,
-        "avg_battery": round(float(avg_battery), 1),
-        "today_warnings": warning_count,
-        "current_avg_db": round(float(recent_avg_db), 1)
+        "total_households": total_households,
+        "urgent_households": urgent_count,
+        "today_noise_count": today_noise_count,
+        "completed_count": completed_count
     }
 
 @app.post("/api/v1/sensor-readings")
