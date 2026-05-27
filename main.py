@@ -2842,3 +2842,25 @@ def get_household_home(household_id: int, db: Session = Depends(get_db)):
             } for n in notices
         ]
     }
+
+
+@app.get("/api/v1/households/{household_id}/noise-stats")
+def get_household_noise_stats(household_id: int, db: Session = Depends(get_db)):
+    since = datetime.utcnow() - timedelta(hours=24)
+
+    logs = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id,
+        models.NoiseLog.timestamp >= since
+    ).all()
+
+    total_count = len(logs)
+    high_count = sum(1 for l in logs if l.severity == "high")
+    durations = [l.duration_ms for l in logs if l.duration_ms]
+    avg_duration_min = round(sum(durations) / len(durations) / 60000, 1) if durations else 0
+
+    return {
+        "total_count": total_count,
+        "high_count": high_count,
+        "avg_duration_min": avg_duration_min,
+        "period": "최근 24시간"
+    }
