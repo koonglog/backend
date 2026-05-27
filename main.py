@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -27,7 +28,13 @@ load_dotenv()
 load_dotenv(dotenv_path="/Users/ijiho/backend/.env")
 ENABLE_OPENAI = os.getenv("ENABLE_OPENAI", "false").lower() == "true"
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if ENABLE_OPENAI else None
-AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "http://10.118.65.207:8001")
+AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "https://ai-production-a761.up.railway.app")
+DEFAULT_CORS_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000"
+CORS_ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOWED_ORIGINS", DEFAULT_CORS_ORIGINS).split(",")
+    if origin.strip()
+]
 DEFAULT_ADMIN_EMAIL = os.getenv("DEFAULT_ADMIN_EMAIL", "admin@koonglog.com")
 DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD", "admin1234")
 
@@ -213,6 +220,14 @@ else:
 
 
 app = FastAPI(title="쿵로그(KungLog) AI 통합 서버")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 # --- Pydantic 스키마 ---
 
