@@ -26,7 +26,6 @@ class Household(Base):
     unit_number = Column(String)
     floor = Column(Integer)
     alias = Column(String)
-<<<<<<< HEAD
     resident_name = Column(String, nullable=True)   # 추가
     phone_number = Column(String, nullable=True)    # 추가
     quiet_start_time = Column(String, nullable=True)  # 추가
@@ -34,13 +33,11 @@ class Household(Base):
     is_active = Column(Boolean, default=True)
     last_login_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
-=======
     resident_name = Column(String, nullable=True)
     phone_number = Column(String, nullable=True)
     quiet_start_time = Column(String, nullable=True)  # 추가
     quiet_end_time = Column(String, nullable=True)    # 추가
 
->>>>>>> feat/db-expand
 
 # 관리자 테이블
 class Admin(Base):
