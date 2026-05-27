@@ -2218,3 +2218,19 @@ def withdraw_household(household_id: int, db: Session = Depends(get_db)):
 def logout():
     return {"status": "success", "message": "로그아웃 되었습니다."}
 
+class PasswordUpdate(BaseModel):
+    admin_id: int
+    current_password: str
+    new_password: str
+
+@app.patch("/api/v1/auth/update-password")
+def update_password(data: PasswordUpdate, db: Session = Depends(get_db)):
+    admin = db.query(models.Admin).filter(models.Admin.id == data.admin_id).first()
+    if not admin:
+        raise HTTPException(status_code=404, detail="관리자를 찾을 수 없습니다.")
+    if admin.password != data.current_password:
+        raise HTTPException(status_code=400, detail="현재 비밀번호가 일치하지 않습니다.")
+    admin.password = data.new_password
+    db.commit()
+    return {"status": "success", "message": "비밀번호가 변경되었습니다."}
+
