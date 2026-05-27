@@ -2189,3 +2189,32 @@ def get_household_summary(household_id: int, db: Session = Depends(get_db)):
             } for l in recent_events
         ]
     }
+# --- 주민 프로필 ---
+
+@app.get("/api/v1/households/{household_id}/profile")
+def get_household_profile(household_id: int, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(models.Household.id == household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+    return {
+        "household_id": household.id,
+        "resident_name": household.resident_name,
+        "building_name": household.building_name,
+        "unit_number": household.unit_number,
+        "floor": household.floor,
+        "alias": household.alias
+    }
+
+@app.delete("/api/v1/households/{household_id}/withdraw")
+def withdraw_household(household_id: int, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(models.Household.id == household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+    db.delete(household)
+    db.commit()
+    return {"status": "success", "message": "회원 탈퇴가 완료되었습니다."}
+
+@app.post("/api/v1/auth/logout")
+def logout():
+    return {"status": "success", "message": "로그아웃 되었습니다."}
+
