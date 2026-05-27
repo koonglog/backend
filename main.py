@@ -2426,7 +2426,6 @@ def create_mediation_request(data: MediationCreateRequest, db: Session = Depends
         "mediation_id": new_med.id,
         "ai_message": msg["ai_message"]
     }
-<<<<<<< HEAD
 
 @app.get("/api/v1/households/{household_id}/summary")
 def get_household_summary(household_id: int, db: Session = Depends(get_db)):
@@ -2570,8 +2569,6 @@ def update_quiet_time(household_id: int, data: QuietTimeUpdate, db: Session = De
     db.refresh(household)
     return {"status": "success", "quiet_start_time": data.quiet_start_time, "quiet_end_time": data.quiet_end_time}
 
-=======
->>>>>>> feat/db-expand
 @app.get("/api/v1/households/{household_id}/home")
 def get_household_home(household_id: int, db: Session = Depends(get_db)):
     # 중재 진행 상태
