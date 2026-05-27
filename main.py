@@ -2069,3 +2069,48 @@ def get_schedule_overlap(med_id: int, db: Session = Depends(get_db)):
         "total_responses": len(schedules)
     }
 
+
+class MediationCreateRequest(BaseModel):
+    household_id: int
+    complaint_text: str
+    noise_type: str  # impact_noise, daily_noise 등
+    time_of_day: str  # day, night
+    frequency: str  # once, sometimes, often
+
+
+@app.post("/api/v1/mediations/request")
+def create_mediation_request(data: MediationCreateRequest, db: Session = Depends(get_db)):
+    household = db.query(models.Household).filter(models.Household.id == data.household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+
+    is_night = data.time_of_day == "night"
+
+    msg = generate_ai_message(
+        unit=household.alias,
+        sound_level=0.0,
+        event_type=data.noise_type,
+        is_night=is_night
+    )
+
+    new_med = models.Mediation(
+        household_id=data.household_id,
+        target_unit=household.alias,
+        ai_message=msg["ai_message"],
+        event_summary=msg["event_summary"],
+        resident_message=data.complaint_text,
+        admin_summary=msg["admin_summary"],
+        recommended_action=msg["recommended_action"],
+        generation_method=msg["generation_method"],
+        tone_check_json=json.dumps(msg["tone_check"], ensure_ascii=False),
+        status="pending"
+    )
+    db.add(new_med)
+    db.commit()
+    db.refresh(new_med)
+
+    return {
+        "status": "success",
+        "mediation_id": new_med.id,
+        "ai_message": msg["ai_message"]
+    }
