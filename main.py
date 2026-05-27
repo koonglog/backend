@@ -2551,3 +2551,30 @@ def update_quiet_time(household_id: int, data: QuietTimeUpdate, db: Session = De
     db.refresh(household)
     return {"status": "success", "quiet_start_time": data.quiet_start_time, "quiet_end_time": data.quiet_end_time}
 
+@app.get("/api/v1/households/{household_id}/home")
+def get_household_home(household_id: int, db: Session = Depends(get_db)):
+    # 중재 진행 상태
+    mediation = db.query(models.Mediation).filter(
+        models.Mediation.household_id == household_id,
+        models.Mediation.status == "pending"
+    ).order_by(models.Mediation.created_at.desc()).first()
+
+    # 공지사항 최근 3개
+    notices = db.query(models.Notice).filter(
+        models.Notice.status == "sent"
+    ).order_by(models.Notice.created_at.desc()).limit(3).all()
+
+    return {
+        "mediation": {
+            "id": mediation.id,
+            "status": mediation.status,
+            "created_at": mediation.created_at
+        } if mediation else None,
+        "notices": [
+            {
+                "id": n.id,
+                "title": n.title,
+                "created_at": n.created_at
+            } for n in notices
+        ]
+    }
