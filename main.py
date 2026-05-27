@@ -1386,12 +1386,30 @@ def get_mediations(status: Optional[str] = None, db: Session = Depends(get_db)):
         query = query.filter(models.Mediation.status == status)
     return query.all()
 
-@app.get("/api/v1/mediations/{med_id}", response_model=MediationResponse)
+
+@app.get("/api/v1/mediations/{med_id}")
 def get_mediation(med_id: int, db: Session = Depends(get_db)):
     med = db.query(models.Mediation).filter(models.Mediation.id == med_id).first()
     if not med:
         raise HTTPException(status_code=404, detail="해당 중재 정보를 찾을 수 없습니다.")
-    return med
+
+    household = db.query(models.Household).filter(models.Household.id == med.household_id).first()
+
+    result = {
+        "id": med.id,
+        "target_unit": med.target_unit,
+        "ai_message": med.ai_message,
+        "event_summary": med.event_summary,
+        "resident_message": med.resident_message,
+        "admin_summary": med.admin_summary,
+        "recommended_action": med.recommended_action,
+        "generation_method": med.generation_method,
+        "status": med.status,
+        "created_at": med.created_at,
+        "quiet_start_time": household.quiet_start_time if household else None,
+        "quiet_end_time": household.quiet_end_time if household else None
+    }
+    return result
 
 @app.patch("/api/v1/mediations/{med_id}", response_model=MediationResponse)
 def update_mediation_status(med_id: int, data: MediationUpdate, db: Session = Depends(get_db)):
@@ -2408,6 +2426,7 @@ def create_mediation_request(data: MediationCreateRequest, db: Session = Depends
         "mediation_id": new_med.id,
         "ai_message": msg["ai_message"]
     }
+<<<<<<< HEAD
 
 @app.get("/api/v1/households/{household_id}/summary")
 def get_household_summary(household_id: int, db: Session = Depends(get_db)):
@@ -2551,6 +2570,8 @@ def update_quiet_time(household_id: int, data: QuietTimeUpdate, db: Session = De
     db.refresh(household)
     return {"status": "success", "quiet_start_time": data.quiet_start_time, "quiet_end_time": data.quiet_end_time}
 
+=======
+>>>>>>> feat/db-expand
 @app.get("/api/v1/households/{household_id}/home")
 def get_household_home(household_id: int, db: Session = Depends(get_db)):
     # 중재 진행 상태
