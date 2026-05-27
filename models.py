@@ -18,6 +18,10 @@ class Household(Base):
     __tablename__ = "households"
 
     id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, index=True, nullable=True)
+    email = Column(String, unique=True, index=True, nullable=True)
+    password_hash = Column(String, nullable=True)
+    apartment_name = Column(String, nullable=True)
     building_name = Column(String)
     unit_number = Column(String)
     floor = Column(Integer)
@@ -26,6 +30,9 @@ class Household(Base):
     phone_number = Column(String, nullable=True)    # 추가
     quiet_start_time = Column(String, nullable=True)  # 추가
     quiet_end_time = Column(String, nullable=True)  # 추가
+    is_active = Column(Boolean, default=True)
+    last_login_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
 
 # 관리자 테이블
 class Admin(Base):
