@@ -1143,6 +1143,112 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
         "completed_count": completed_count
     }
 
+@app.get("/api/v1/dashboard/pending-mediations")
+def get_pending_mediation_summary(db: Session = Depends(get_db)):
+    """홈 화면의 미결재/미처리 중재 요청 요약"""
+    pending_statuses = ["pending", "new", "in_progress", "processing"]
+    pending_mediations = db.query(models.Mediation).filter(
+        models.Mediation.status.in_(pending_statuses)
+    ).order_by(models.Mediation.created_at.desc()).all()
+
+    latest = pending_mediations[0] if pending_mediations else None
+
+    return {
+        "pending_count": len(pending_mediations),
+        "status_filter": pending_statuses,
+        "latest_request": {
+            "id": latest.id,
+            "household_id": latest.household_id,
+            "target_unit": latest.target_unit,
+            "resident_message": latest.resident_message,
+            "event_summary": latest.event_summary,
+            "status": latest.status,
+            "created_at": latest.created_at
+        } if latest else None
+    }
+
+@app.get("/api/v1/dashboard/notices/summary")
+def get_notice_dashboard_summary(db: Session = Depends(get_db)):
+    """홈 화면 공지사항 탭 요약"""
+    recent_since = datetime.utcnow() - timedelta(days=7)
+    total_households = db.query(models.Household).count()
+
+    recent_notices = db.query(models.Notice).filter(
+        models.Notice.status.in_(["sent", "scheduled"]),
+        models.Notice.created_at >= recent_since
+    ).order_by(models.Notice.created_at.desc()).all()
+
+    latest_notice = db.query(models.Notice).filter(
+        models.Notice.status.in_(["sent", "scheduled"])
+    ).order_by(models.Notice.created_at.desc()).first()
+
+    # 현재 DB에는 공지 확인 이력 테이블이 없어 확인율은 추적 불가 상태로 반환한다.
+    confirmation_tracking_enabled = False
+    avg_confirmation_rate = 0
+    unconfirmed_households = total_households if latest_notice else 0
+
+    return {
+        "recent_sent_count": len(recent_notices),
+        "recent_period_days": 7,
+        "avg_confirmation_rate": avg_confirmation_rate,
+        "unconfirmed_households": unconfirmed_households,
+        "confirmation_tracking_enabled": confirmation_tracking_enabled,
+        "latest_notice": {
+            "id": latest_notice.id,
+            "title": latest_notice.title,
+            "notice_type": latest_notice.notice_type,
+            "status": latest_notice.status,
+            "created_at": latest_notice.created_at,
+            "sent_at": latest_notice.sent_at
+        } if latest_notice else None
+    }
+
+@app.get("/api/v1/dashboard/backup-status")
+def get_backup_status_summary(db: Session = Depends(get_db)):
+    """홈 화면 데이터 백업 상태 요약"""
+
+    def format_elapsed(dt: Optional[datetime]) -> Optional[str]:
+        if not dt:
+            return None
+        delta = datetime.utcnow() - dt
+        minutes = max(int(delta.total_seconds() // 60), 0)
+        if minutes < 1:
+            return "방금 전"
+        if minutes < 60:
+            return f"{minutes}분 전"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}시간 전"
+        return f"{hours // 24}일 전"
+
+    def item(label: str, last_synced_at: Optional[datetime], error_if_empty: bool = False) -> dict:
+        status = "normal" if last_synced_at else ("error" if error_if_empty else "empty")
+        status_label = "정상" if status == "normal" else "오류" if status == "error" else "데이터 없음"
+        return {
+            "label": label,
+            "status": status,
+            "status_label": status_label,
+            "last_synced_at": last_synced_at,
+            "last_synced_text": format_elapsed(last_synced_at)
+        }
+
+    latest_noise_log = db.query(func.max(models.NoiseLog.timestamp)).scalar()
+    latest_mediation = db.query(func.max(models.Mediation.created_at)).scalar()
+    latest_sensor = db.query(func.max(models.Sensor.last_checked)).scalar()
+
+    items = [
+        item("소음 로그 데이터", latest_noise_log),
+        item("중재 기록", latest_mediation),
+        item("센서 상태 로그", latest_sensor, error_if_empty=True)
+    ]
+
+    has_error = any(entry["status"] == "error" for entry in items)
+    return {
+        "overall_status": "error" if has_error else "normal",
+        "overall_status_label": "오류" if has_error else "정상",
+        "items": items
+    }
+
 @app.post("/api/v1/sensor-readings")
 async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
     sensor = db.query(models.Sensor).filter(models.Sensor.sensor_id == data.sensor_id).first()
