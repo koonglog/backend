@@ -2921,3 +2921,52 @@ def update_quiet_time(household_id: int, data: QuietTimeUpdate, db: Session = De
     db.refresh(household)
     return {"status": "success", "quiet_start_time": data.quiet_start_time, "quiet_end_time": data.quiet_end_time}
 
+@app.get("/api/v1/households/{household_id}/home")
+def get_household_home(household_id: int, db: Session = Depends(get_db)):
+    # 중재 진행 상태
+    mediation = db.query(models.Mediation).filter(
+        models.Mediation.household_id == household_id,
+        models.Mediation.status == "pending"
+    ).order_by(models.Mediation.created_at.desc()).first()
+
+    # 공지사항 최근 3개
+    notices = db.query(models.Notice).filter(
+        models.Notice.status == "sent"
+    ).order_by(models.Notice.created_at.desc()).limit(3).all()
+
+    return {
+        "mediation": {
+            "id": mediation.id,
+            "status": mediation.status,
+            "created_at": mediation.created_at
+        } if mediation else None,
+        "notices": [
+            {
+                "id": n.id,
+                "title": n.title,
+                "created_at": n.created_at
+            } for n in notices
+        ]
+    }
+
+
+@app.get("/api/v1/households/{household_id}/noise-stats")
+def get_household_noise_stats(household_id: int, db: Session = Depends(get_db)):
+    since = datetime.utcnow() - timedelta(hours=24)
+
+    logs = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id,
+        models.NoiseLog.timestamp >= since
+    ).all()
+
+    total_count = len(logs)
+    high_count = sum(1 for l in logs if l.severity == "high")
+    durations = [l.duration_ms for l in logs if l.duration_ms]
+    avg_duration_min = round(sum(durations) / len(durations) / 60000, 1) if durations else 0
+
+    return {
+        "total_count": total_count,
+        "high_count": high_count,
+        "avg_duration_min": avg_duration_min,
+        "period": "최근 24시간"
+    }

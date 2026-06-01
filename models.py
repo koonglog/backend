@@ -33,6 +33,11 @@ class Household(Base):
     is_active = Column(Boolean, default=True)
     last_login_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+    resident_name = Column(String, nullable=True)
+    phone_number = Column(String, nullable=True)
+    quiet_start_time = Column(String, nullable=True)  # 추가
+    quiet_end_time = Column(String, nullable=True)    # 추가
+
 
 
 # 관리자 테이블
