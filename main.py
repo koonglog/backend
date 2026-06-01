@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from pydantic import BaseModel
@@ -8,7 +8,9 @@ from datetime import datetime, date, timedelta, timezone
 from typing import List, Optional
 
 import base64
+import csv
 import hashlib
+import io
 import json
 import math
 import requests
@@ -1401,34 +1403,160 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
         "ai_result": ai_result
     }
 
-@app.get("/api/v1/noise-logs")
-def get_noise_logs(household_id: Optional[int] = None, db: Session = Depends(get_db)):
+def _effective_since_or_week_ago(since: Optional[datetime]) -> datetime:
+    if since:
+        return since.replace(tzinfo=None) if since.tzinfo else since
+    return datetime.now(UTC).replace(tzinfo=None) - timedelta(days=7)
+
+
+def _noise_log_to_dict(log: models.NoiseLog) -> dict:
+    return {
+        "id": log.id,
+        "sensor_id": log.sensor_id,
+        "household_id": log.household_id,
+        "sound_level": log.sound_level,
+        "vibration_value": log.vibration_value,
+        "duration_ms": log.duration_ms,
+        "event_type": log.event_type,
+        "severity": log.severity,
+        "severity_score": log.severity_score,
+        "confidence": log.confidence,
+        "is_night": log.is_night,
+        "pattern_label": log.pattern_label,
+        "status": log.status,
+        "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+    }
+
+
+@app.get(
+    "/api/v1/noise-logs/recent",
+    responses={
+        200: {
+            "description": "최근 소음 로그 조회",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "since": "2026-05-25T12:00:00",
+                        "limit": 20,
+                        "total": 2,
+                        "logs": [
+                            {
+                                "id": 1506,
+                                "sensor_id": "SENSOR-A101-01",
+                                "household_id": 1,
+                                "sound_level": 90.0,
+                                "vibration_value": 1000.0,
+                                "duration_ms": 3000,
+                                "event_type": "impact_noise",
+                                "severity": "high",
+                                "severity_score": 8.0,
+                                "confidence": 0.87,
+                                "is_night": False,
+                                "pattern_label": "no_pattern",
+                                "status": "new",
+                                "timestamp": "2026-05-11T12:36:35",
+                            },
+                            {
+                                "id": 1505,
+                                "sensor_id": "SENSOR-A101-01",
+                                "household_id": 1,
+                                "sound_level": 55.0,
+                                "vibration_value": 700.0,
+                                "duration_ms": 3000,
+                                "event_type": "daily_noise",
+                                "severity": "medium",
+                                "severity_score": 4.0,
+                                "confidence": 0.74,
+                                "is_night": False,
+                                "pattern_label": "no_pattern",
+                                "status": "new",
+                                "timestamp": "2026-05-11T12:28:44",
+                            },
+                        ],
+                    }
+                }
+            },
+        }
+    },
+)
+def get_recent_noise_logs(
+    household_id: Optional[int] = Query(None, description="세대 ID. 없으면 전체 세대 조회"),
+    since: Optional[datetime] = Query(None, description="조회 시작 시각. 없으면 최근 7일 기준"),
+    limit: int = Query(20, ge=1, le=100, description="조회 개수"),
+    db: Session = Depends(get_db),
+):
+    effective_since = _effective_since_or_week_ago(since)
     query = db.query(models.NoiseLog).order_by(models.NoiseLog.timestamp.desc())
+    query = query.filter(models.NoiseLog.timestamp >= effective_since)
     if household_id:
         query = query.filter(models.NoiseLog.household_id == household_id)
-    logs = query.limit(50).all()
-    return {"logs": [
-        {
-            "id": log.id,
-            "sensor_id": log.sensor_id,
-            "household_id": log.household_id,
-            "sound_level": log.sound_level,
-            "vibration_value": log.vibration_value,
-            "event_type": log.event_type,
-            "severity": log.severity,
-            "is_night": log.is_night,
-            "status": log.status,
-            "timestamp": log.timestamp
-        } for log in logs
-    ]}
+    logs = query.limit(limit).all()
+    return {
+        "since": effective_since.isoformat(),
+        "limit": limit,
+        "total": len(logs),
+        "logs": [_noise_log_to_dict(log) for log in logs],
+    }
 
-@app.get("/api/v1/noise-logs/recent")
-def get_recent_noise_logs(since: Optional[datetime] = None, db: Session = Depends(get_db)):
+
+@app.get("/api/v1/noise-logs/recent/export")
+def export_recent_noise_logs(
+    household_id: Optional[int] = Query(None, description="세대 ID. 없으면 전체 세대 내보내기"),
+    since: Optional[datetime] = Query(None, description="내보내기 시작 시각. 없으면 최근 7일 기준"),
+    limit: int = Query(1000, ge=1, le=10000, description="내보내기 최대 개수"),
+    db: Session = Depends(get_db),
+):
+    effective_since = _effective_since_or_week_ago(since)
     query = db.query(models.NoiseLog).order_by(models.NoiseLog.timestamp.desc())
-    if since:
-        query = query.filter(models.NoiseLog.timestamp > since)
-    logs = query.limit(20).all()
-    return {"logs": logs}
+    query = query.filter(models.NoiseLog.timestamp >= effective_since)
+    if household_id:
+        query = query.filter(models.NoiseLog.household_id == household_id)
+    logs = query.limit(limit).all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "id",
+        "sensor_id",
+        "household_id",
+        "sound_level",
+        "vibration_value",
+        "duration_ms",
+        "event_type",
+        "severity",
+        "severity_score",
+        "confidence",
+        "is_night",
+        "pattern_label",
+        "status",
+        "timestamp",
+    ])
+    for log in logs:
+        row = _noise_log_to_dict(log)
+        writer.writerow([
+            row["id"],
+            row["sensor_id"],
+            row["household_id"],
+            row["sound_level"],
+            row["vibration_value"],
+            row["duration_ms"],
+            row["event_type"],
+            row["severity"],
+            row["severity_score"],
+            row["confidence"],
+            row["is_night"],
+            row["pattern_label"],
+            row["status"],
+            row["timestamp"],
+        ])
+
+    filename = f"noise_logs_{datetime.now(KST).strftime('%Y%m%d_%H%M%S')}.csv"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers=headers,
+    )
 
 @app.get("/api/v1/sensor-readings/recent")
 def get_recent_sensor_readings(
@@ -2043,7 +2171,6 @@ def get_custom_report(
     }
 
 # --- PDF 다운로드 ---
-from fastapi.responses import StreamingResponse
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
