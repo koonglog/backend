@@ -261,6 +261,31 @@ else:
     if changed:
         db_init.commit()
 
+if db_init.query(models.NoiseLog).count() == 0:
+    from datetime import datetime, timedelta
+    import random
+
+    event_types = ["impact_noise", "daily_noise", "background_noise"]
+    severities = ["low", "medium", "high"]
+
+    dummy_logs = []
+    for i in range(20):
+        dummy_logs.append(models.NoiseLog(
+            sensor_id="SENSOR-A101-01",
+            household_id=1,
+            sound_level=round(random.uniform(40, 90), 1),
+            vibration_value=round(random.uniform(100, 1000), 1),
+            duration_ms=random.randint(1000, 10000),
+            event_type=random.choice(event_types),
+            severity=random.choice(severities),
+            severity_score=round(random.uniform(0.1, 1.0), 2),
+            is_night=random.choice([True, False]),
+            confidence=0.85,
+            status="new",
+            timestamp=datetime.utcnow() - timedelta(hours=random.randint(0, 24))
+        ))
+    db_init.add_all(dummy_logs)
+    db_init.commit()
 
 app = FastAPI(title="쿵로그(KungLog) AI 통합 서버")
 
@@ -2408,7 +2433,7 @@ def export_noise_distribution(db: Session = Depends(get_db)):
 # --- 대시보드 ---
 
 @app.get("/api/v1/dashboard/households")
-def get_dashboard_households(db: Session = Depends(get_db)):
+def get_dashboard_households(building: Optional[str] = None, db: Session = Depends(get_db)):
     """전체 모니터링 세대 목록"""
     households = db.query(models.Household).all()
     today = date.today()
@@ -2538,29 +2563,44 @@ def get_completed_actions(db: Session = Depends(get_db)):
     ], "total": len(mediations)}
 
 @app.get("/api/v1/dashboard/hourly")
+@app.get("/api/v1/dashboard/hourly")
 def get_hourly_stats(hours: int = 24, db: Session = Depends(get_db)):
     now = datetime.now()
     since = now - timedelta(hours=hours)
-
     logs = db.query(models.NoiseLog).filter(
         models.NoiseLog.timestamp >= since
     ).all()
 
-    hourly = {}
-    for i in range(hours):
-        hour = (now - timedelta(hours=hours-1-i)).hour
-        hourly[f"{hour:02d}"] = {"total": 0, "high": 0, "night": 0}
-
-    for log in logs:
-        hour_key = f"{log.timestamp.hour:02d}"
-        if hour_key in hourly:
-            hourly[hour_key]["total"] += 1
-            if log.severity == "high":
-                hourly[hour_key]["high"] += 1
-            if log.is_night:
-                hourly[hour_key]["night"] += 1
-
-    return {"hourly": hourly, "period": f"최근 {hours}시간"}
+    if hours == 1:
+        # 5분 간격
+        intervals = {}
+        for i in range(12):
+            key = (now - timedelta(minutes=55 - i*5)).strftime("%H:%M")
+            intervals[key] = {"total": 0, "high": 0, "night": 0}
+        for log in logs:
+            minute = (log.timestamp.minute // 5) * 5
+            key = log.timestamp.strftime(f"%H:{minute:02d}")
+            if key in intervals:
+                intervals[key]["total"] += 1
+                if log.severity == "high":
+                    intervals[key]["high"] += 1
+                if log.is_night:
+                    intervals[key]["night"] += 1
+        return {"hourly": intervals, "period": "최근 1시간"}
+    else:
+        hourly = {}
+        for i in range(hours):
+            hour = (now - timedelta(hours=hours-1-i)).hour
+            hourly[f"{hour:02d}"] = {"total": 0, "high": 0, "night": 0}
+        for log in logs:
+            hour_key = f"{log.timestamp.hour:02d}"
+            if hour_key in hourly:
+                hourly[hour_key]["total"] += 1
+                if log.severity == "high":
+                    hourly[hour_key]["high"] += 1
+                if log.is_night:
+                    hourly[hour_key]["night"] += 1
+        return {"hourly": hourly, "period": f"최근 {hours}시간"}
 
 
 # --- 협의 일정 ---
@@ -2969,4 +3009,41 @@ def get_household_noise_stats(household_id: int, db: Session = Depends(get_db)):
         "high_count": high_count,
         "avg_duration_min": avg_duration_min,
         "period": "최근 24시간"
+    }
+
+
+@app.get("/api/v1/noise/hotspot")
+def get_noise_hotspot(db: Session = Depends(get_db)):
+    households = db.query(models.Household).all()
+
+    buildings = {}
+    for household in households:
+        logs = db.query(models.NoiseLog).filter(
+            models.NoiseLog.household_id == household.id
+        ).all()
+
+        total_count = len(logs)
+        high_count = sum(1 for l in logs if l.severity == "high")
+
+        if total_count >= 7 or high_count >= 3:
+            risk_level = "urgent"
+        elif total_count >= 3:
+            risk_level = "caution"
+        else:
+            risk_level = "normal"
+
+        bname = household.building_name
+        if bname not in buildings:
+            buildings[bname] = {"urgent": 0, "caution": 0, "normal": 0, "total": 0}
+
+        buildings[bname][risk_level] += 1
+        buildings[bname]["total"] += 1
+
+    return {
+        "buildings": buildings,
+        "legend": {
+            "urgent": "긴급 대응 필요",
+            "caution": "관찰 필요",
+            "normal": "정상"
+        }
     }
