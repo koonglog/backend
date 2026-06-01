@@ -412,6 +412,29 @@ class ResidentPasswordResetRequest(BaseModel):
     phone_number: str
     new_password: str
 
+class ResidentProfileUpdate(BaseModel):
+    resident_name: Optional[str] = None
+    email: Optional[str] = None
+    username: Optional[str] = None
+    phone_number: Optional[str] = None
+
+class ResidentApartmentUpdate(BaseModel):
+    apartment_name: Optional[str] = None
+    building_name: Optional[str] = None
+    unit_number: Optional[str] = None
+    floor: Optional[int] = None
+    alias: Optional[str] = None
+
+class ResidentPasswordUpdate(BaseModel):
+    current_password: str
+    new_password: str
+
+class NoiseMeasurementCreate(BaseModel):
+    sound_level: float
+    vibration_value: Optional[float] = 0.0
+    duration_ms: Optional[int] = None
+    timestamp: Optional[datetime] = None
+
 def serialize_admin(admin: models.Admin) -> dict:
     return {
         "id": admin.id,
@@ -447,6 +470,12 @@ def serialize_resident(household: models.Household) -> dict:
         "quiet_start_time": household.quiet_start_time,
         "quiet_end_time": household.quiet_end_time,
     }
+
+def get_household_or_404(household_id: int, db: Session) -> models.Household:
+    household = db.query(models.Household).filter(models.Household.id == household_id).first()
+    if not household:
+        raise HTTPException(status_code=404, detail="세대를 찾을 수 없습니다.")
+    return household
 
 # --- 관리자 인증 API ---
 
@@ -606,6 +635,74 @@ def reset_resident_password(data: ResidentPasswordResetRequest, db: Session = De
     ).first()
     if not household:
         raise HTTPException(status_code=404, detail="일치하는 입주민 계정을 찾을 수 없습니다.")
+    household.password_hash = hash_password(data.new_password)
+    db.commit()
+    return {"status": "success", "message": "비밀번호가 변경되었습니다."}
+
+@app.patch("/api/v1/residents/{household_id}/profile")
+def update_resident_profile(household_id: int, data: ResidentProfileUpdate, db: Session = Depends(get_db)):
+    household = get_household_or_404(household_id, db)
+
+    if data.username:
+        username = normalize_username(data.username)
+        existing = db.query(models.Household).filter(
+            models.Household.username == username,
+            models.Household.id != household_id
+        ).first()
+        if existing:
+            raise HTTPException(status_code=409, detail="이미 사용 중인 아이디입니다.")
+        household.username = username
+
+    if data.email:
+        email = normalize_email(data.email)
+        existing = db.query(models.Household).filter(
+            models.Household.email == email,
+            models.Household.id != household_id
+        ).first()
+        if existing:
+            raise HTTPException(status_code=409, detail="이미 사용 중인 이메일입니다.")
+        household.email = email
+
+    if data.resident_name:
+        household.resident_name = data.resident_name
+    if data.phone_number:
+        household.phone_number = data.phone_number
+
+    db.commit()
+    db.refresh(household)
+    return {"status": "success", "resident": serialize_resident(household)}
+
+@app.get("/api/v1/residents/{household_id}/profile")
+def get_resident_profile(household_id: int, db: Session = Depends(get_db)):
+    household = get_household_or_404(household_id, db)
+    return {"resident": serialize_resident(household)}
+
+@app.patch("/api/v1/residents/{household_id}/apartment")
+def update_resident_apartment(household_id: int, data: ResidentApartmentUpdate, db: Session = Depends(get_db)):
+    household = get_household_or_404(household_id, db)
+    if data.apartment_name:
+        household.apartment_name = data.apartment_name
+    if data.building_name:
+        household.building_name = data.building_name
+    if data.unit_number:
+        household.unit_number = data.unit_number
+    if data.floor:
+        household.floor = data.floor
+    if data.alias:
+        household.alias = data.alias
+    elif data.apartment_name or data.building_name or data.unit_number:
+        apartment_name = household.apartment_name or ""
+        household.alias = f"{apartment_name} {household.building_name} {household.unit_number}".strip()
+
+    db.commit()
+    db.refresh(household)
+    return {"status": "success", "resident": serialize_resident(household)}
+
+@app.patch("/api/v1/residents/{household_id}/password", response_model=BasicStatusResponse)
+def update_resident_password(household_id: int, data: ResidentPasswordUpdate, db: Session = Depends(get_db)):
+    household = get_household_or_404(household_id, db)
+    if not verify_password(data.current_password, household.password_hash):
+        raise HTTPException(status_code=400, detail="현재 비밀번호가 일치하지 않습니다.")
     household.password_hash = hash_password(data.new_password)
     db.commit()
     return {"status": "success", "message": "비밀번호가 변경되었습니다."}
@@ -1046,6 +1143,112 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
         "completed_count": completed_count
     }
 
+@app.get("/api/v1/dashboard/pending-mediations")
+def get_pending_mediation_summary(db: Session = Depends(get_db)):
+    """홈 화면의 미결재/미처리 중재 요청 요약"""
+    pending_statuses = ["pending", "new", "in_progress", "processing"]
+    pending_mediations = db.query(models.Mediation).filter(
+        models.Mediation.status.in_(pending_statuses)
+    ).order_by(models.Mediation.created_at.desc()).all()
+
+    latest = pending_mediations[0] if pending_mediations else None
+
+    return {
+        "pending_count": len(pending_mediations),
+        "status_filter": pending_statuses,
+        "latest_request": {
+            "id": latest.id,
+            "household_id": latest.household_id,
+            "target_unit": latest.target_unit,
+            "resident_message": latest.resident_message,
+            "event_summary": latest.event_summary,
+            "status": latest.status,
+            "created_at": latest.created_at
+        } if latest else None
+    }
+
+@app.get("/api/v1/dashboard/notices/summary")
+def get_notice_dashboard_summary(db: Session = Depends(get_db)):
+    """홈 화면 공지사항 탭 요약"""
+    recent_since = datetime.utcnow() - timedelta(days=7)
+    total_households = db.query(models.Household).count()
+
+    recent_notices = db.query(models.Notice).filter(
+        models.Notice.status.in_(["sent", "scheduled"]),
+        models.Notice.created_at >= recent_since
+    ).order_by(models.Notice.created_at.desc()).all()
+
+    latest_notice = db.query(models.Notice).filter(
+        models.Notice.status.in_(["sent", "scheduled"])
+    ).order_by(models.Notice.created_at.desc()).first()
+
+    # 현재 DB에는 공지 확인 이력 테이블이 없어 확인율은 추적 불가 상태로 반환한다.
+    confirmation_tracking_enabled = False
+    avg_confirmation_rate = 0
+    unconfirmed_households = total_households if latest_notice else 0
+
+    return {
+        "recent_sent_count": len(recent_notices),
+        "recent_period_days": 7,
+        "avg_confirmation_rate": avg_confirmation_rate,
+        "unconfirmed_households": unconfirmed_households,
+        "confirmation_tracking_enabled": confirmation_tracking_enabled,
+        "latest_notice": {
+            "id": latest_notice.id,
+            "title": latest_notice.title,
+            "notice_type": latest_notice.notice_type,
+            "status": latest_notice.status,
+            "created_at": latest_notice.created_at,
+            "sent_at": latest_notice.sent_at
+        } if latest_notice else None
+    }
+
+@app.get("/api/v1/dashboard/backup-status")
+def get_backup_status_summary(db: Session = Depends(get_db)):
+    """홈 화면 데이터 백업 상태 요약"""
+
+    def format_elapsed(dt: Optional[datetime]) -> Optional[str]:
+        if not dt:
+            return None
+        delta = datetime.utcnow() - dt
+        minutes = max(int(delta.total_seconds() // 60), 0)
+        if minutes < 1:
+            return "방금 전"
+        if minutes < 60:
+            return f"{minutes}분 전"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}시간 전"
+        return f"{hours // 24}일 전"
+
+    def item(label: str, last_synced_at: Optional[datetime], error_if_empty: bool = False) -> dict:
+        status = "normal" if last_synced_at else ("error" if error_if_empty else "empty")
+        status_label = "정상" if status == "normal" else "오류" if status == "error" else "데이터 없음"
+        return {
+            "label": label,
+            "status": status,
+            "status_label": status_label,
+            "last_synced_at": last_synced_at,
+            "last_synced_text": format_elapsed(last_synced_at)
+        }
+
+    latest_noise_log = db.query(func.max(models.NoiseLog.timestamp)).scalar()
+    latest_mediation = db.query(func.max(models.Mediation.created_at)).scalar()
+    latest_sensor = db.query(func.max(models.Sensor.last_checked)).scalar()
+
+    items = [
+        item("소음 로그 데이터", latest_noise_log),
+        item("중재 기록", latest_mediation),
+        item("센서 상태 로그", latest_sensor, error_if_empty=True)
+    ]
+
+    has_error = any(entry["status"] == "error" for entry in items)
+    return {
+        "overall_status": "error" if has_error else "normal",
+        "overall_status_label": "오류" if has_error else "정상",
+        "items": items
+    }
+
 @app.post("/api/v1/sensor-readings")
 async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
     sensor = db.query(models.Sensor).filter(models.Sensor.sensor_id == data.sensor_id).first()
@@ -1455,6 +1658,30 @@ def get_resident_mediations(household_id: int, status: Optional[str] = None, db:
         "total": len(mediations)
     }
 
+@app.get("/api/v1/residents/{household_id}/mediations/{mediation_id}")
+def get_resident_mediation_detail(household_id: int, mediation_id: int, db: Session = Depends(get_db)):
+    household = get_household_or_404(household_id, db)
+    mediation = db.query(models.Mediation).filter(
+        models.Mediation.id == mediation_id,
+        models.Mediation.household_id == household_id
+    ).first()
+    if not mediation:
+        raise HTTPException(status_code=404, detail="중재 메시지를 찾을 수 없습니다.")
+
+    return {
+        "id": mediation.id,
+        "household_id": mediation.household_id,
+        "target_unit": mediation.target_unit,
+        "ai_message": mediation.ai_message,
+        "event_summary": mediation.event_summary,
+        "resident_message": mediation.resident_message,
+        "recommended_action": mediation.recommended_action,
+        "status": mediation.status,
+        "created_at": mediation.created_at,
+        "quiet_start_time": household.quiet_start_time,
+        "quiet_end_time": household.quiet_end_time
+    }
+
 @app.get("/api/v1/admin/cases")
 def get_admin_cases(db: Session = Depends(get_db)):
     mediations = db.query(models.Mediation).order_by(models.Mediation.created_at.desc()).all()
@@ -1571,6 +1798,42 @@ def get_resident_notices(household_id: int, db: Session = Depends(get_db)):
         ],
         "total": len(visible_notices)
     }
+
+@app.get("/api/v1/residents/{household_id}/notifications")
+def get_resident_notifications(household_id: int, db: Session = Depends(get_db)):
+    get_household_or_404(household_id, db)
+
+    recent_mediations = db.query(models.Mediation).filter(
+        models.Mediation.household_id == household_id
+    ).order_by(models.Mediation.created_at.desc()).limit(5).all()
+
+    recent_notices = db.query(models.Notice).order_by(
+        models.Notice.created_at.desc()
+    ).limit(5).all()
+
+    notifications = []
+    for mediation in recent_mediations:
+        notifications.append({
+            "id": f"mediation-{mediation.id}",
+            "type": "mediation",
+            "title": "중재 메시지가 도착했습니다.",
+            "message": mediation.event_summary or mediation.resident_message or mediation.ai_message,
+            "created_at": mediation.created_at,
+            "target_id": mediation.id
+        })
+
+    for notice in recent_notices:
+        notifications.append({
+            "id": f"notice-{notice.id}",
+            "type": "notice",
+            "title": notice.title,
+            "message": notice.content,
+            "created_at": notice.created_at,
+            "target_id": notice.id
+        })
+
+    notifications.sort(key=lambda item: item["created_at"] or datetime.min, reverse=True)
+    return {"notifications": notifications[:10], "total": len(notifications[:10])}
 
 @app.delete("/api/v1/notices/{notice_id}")
 def delete_notice(notice_id: int, db: Session = Depends(get_db)):
@@ -2426,7 +2689,6 @@ def create_mediation_request(data: MediationCreateRequest, db: Session = Depends
         "mediation_id": new_med.id,
         "ai_message": msg["ai_message"]
     }
-<<<<<<< HEAD
 
 @app.get("/api/v1/households/{household_id}/summary")
 def get_household_summary(household_id: int, db: Session = Depends(get_db)):
@@ -2486,6 +2748,95 @@ def get_household_summary(household_id: int, db: Session = Depends(get_db)):
                 "timestamp": l.timestamp
             } for l in recent_events
         ]
+    }
+
+@app.get("/api/v1/households/{household_id}/home")
+def get_resident_home(household_id: int, db: Session = Depends(get_db)):
+    household = get_household_or_404(household_id, db)
+    summary = get_household_summary(household_id, db)
+
+    latest_mediation = db.query(models.Mediation).filter(
+        models.Mediation.household_id == household_id
+    ).order_by(models.Mediation.created_at.desc()).first()
+
+    notices_response = get_resident_notices(household_id, db)
+    notices = notices_response["notices"][:3]
+
+    return {
+        "resident": serialize_resident(household),
+        "summary": summary,
+        "latest_mediation": {
+            "id": latest_mediation.id,
+            "status": latest_mediation.status,
+            "resident_message": latest_mediation.resident_message,
+            "event_summary": latest_mediation.event_summary,
+            "created_at": latest_mediation.created_at
+        } if latest_mediation else None,
+        "notices": notices,
+        "notice_count": notices_response["total"]
+    }
+
+@app.post("/api/v1/households/{household_id}/noise/measure")
+def create_resident_noise_measurement(
+    household_id: int,
+    data: NoiseMeasurementCreate,
+    db: Session = Depends(get_db)
+):
+    household = get_household_or_404(household_id, db)
+    measured_at = data.timestamp or datetime.utcnow()
+    severity = "high" if data.sound_level >= 57 else "medium" if data.sound_level >= 40 else "low"
+
+    new_log = models.NoiseLog(
+        household_id=household_id,
+        sound_level=data.sound_level,
+        vibration_value=data.vibration_value,
+        duration_ms=data.duration_ms,
+        event_type="resident_measurement",
+        severity=severity,
+        is_night=is_night_kst(measured_at),
+        status="new",
+        timestamp=measured_at
+    )
+    db.add(new_log)
+    db.commit()
+    db.refresh(new_log)
+
+    return {
+        "status": "success",
+        "measurement": {
+            "id": new_log.id,
+            "household_id": household.id,
+            "sound_level": new_log.sound_level,
+            "vibration_value": new_log.vibration_value,
+            "duration_ms": new_log.duration_ms,
+            "severity": new_log.severity,
+            "is_night": new_log.is_night,
+            "timestamp": new_log.timestamp
+        }
+    }
+
+@app.get("/api/v1/households/{household_id}/noise/latest")
+def get_latest_resident_noise_measurement(household_id: int, db: Session = Depends(get_db)):
+    get_household_or_404(household_id, db)
+    latest_log = db.query(models.NoiseLog).filter(
+        models.NoiseLog.household_id == household_id
+    ).order_by(models.NoiseLog.timestamp.desc()).first()
+
+    if not latest_log:
+        return {"measurement": None}
+
+    return {
+        "measurement": {
+            "id": latest_log.id,
+            "household_id": latest_log.household_id,
+            "sound_level": latest_log.sound_level,
+            "vibration_value": latest_log.vibration_value,
+            "duration_ms": latest_log.duration_ms,
+            "event_type": latest_log.event_type,
+            "severity": latest_log.severity,
+            "is_night": latest_log.is_night,
+            "timestamp": latest_log.timestamp
+        }
     }
 # --- 주민 프로필 ---
 
@@ -2570,8 +2921,6 @@ def update_quiet_time(household_id: int, data: QuietTimeUpdate, db: Session = De
     db.refresh(household)
     return {"status": "success", "quiet_start_time": data.quiet_start_time, "quiet_end_time": data.quiet_end_time}
 
-=======
->>>>>>> feat/db-expand
 @app.get("/api/v1/households/{household_id}/home")
 def get_household_home(household_id: int, db: Session = Depends(get_db)):
     # 중재 진행 상태
