@@ -25,6 +25,9 @@ from openai import OpenAI
 
 KST = timezone(timedelta(hours=9))
 UTC = timezone.utc
+SEVERITY_LEVELS = {"low", "medium", "high", "critical"}
+MEDIATION_SEVERITIES = {"medium", "high", "critical"}
+HIGH_OR_CRITICAL_SEVERITIES = {"high", "critical"}
 
 load_dotenv()
 load_dotenv(dotenv_path="/Users/ijiho/backend/.env")
@@ -735,6 +738,18 @@ def to_utc_iso(value: Optional[datetime]) -> Optional[str]:
         value = value.replace(tzinfo=UTC)
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
+def normalize_severity(severity: str) -> str:
+    normalized = str(severity).strip().lower()
+    if normalized not in SEVERITY_LEVELS:
+        raise HTTPException(
+            status_code=502,
+            detail=f"AI 이벤트 분류 응답 severity가 허용 범위를 벗어났습니다: {severity}"
+        )
+    return normalized
+
+def is_high_or_critical(severity: Optional[str]) -> bool:
+    return (severity or "").lower() in HIGH_OR_CRITICAL_SEVERITIES
+
 def serialize_noise_event_for_ai(event: models.NoiseEvent) -> dict:
     return {
         "detected_at": to_utc_iso(event.started_at),
@@ -808,6 +823,7 @@ def classify_event_with_ai(
                 status_code=502,
                 detail=f"AI 이벤트 분류 응답에 필수 필드가 없습니다: {', '.join(missing)}"
             )
+        classification["severity"] = normalize_severity(classification["severity"])
         classification.setdefault("severity_score", None)
         classification.setdefault("confidence", None)
         classification.setdefault("is_night", is_night)
@@ -1124,7 +1140,7 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
             func.date(models.NoiseLog.timestamp) == today
         ).all()
         total_today = len(logs_today)
-        high_today = sum(1 for l in logs_today if l.severity == "high")
+        high_today = sum(1 for l in logs_today if is_high_or_critical(l.severity))
         if total_today >= 7 or high_today >= 3:
             urgent_count += 1
 
@@ -1359,7 +1375,7 @@ async def create_sensor_reading(data: NoiseData, db: Session = Depends(get_db)):
     ai_result = None
 
     # 8. generate_mediation_message
-    if is_meaningful and (classification["severity"] in ["medium", "high"] or pattern_result["needs_mediation"]):
+    if is_meaningful and (classification["severity"] in MEDIATION_SEVERITIES or pattern_result["needs_mediation"]):
         unit = sensor.location_unit
         msg = generate_ai_message(
             unit=unit,
@@ -2042,7 +2058,7 @@ def get_household_report(household_id: int, start_date: Optional[str] = None, en
 
     total_count = len(logs)
     night_count = sum(1 for l in logs if l.is_night)
-    high_count = sum(1 for l in logs if l.severity == "high")
+    high_count = sum(1 for l in logs if is_high_or_critical(l.severity))
     avg_sound = round(sum(l.sound_level for l in logs) / total_count, 1) if total_count > 0 else 0
 
     event_types = {}
@@ -2095,7 +2111,7 @@ def get_monthly_report(year: int, month: int, db: Session = Depends(get_db)):
 
     total_count = len(logs)
     night_count = sum(1 for l in logs if l.is_night)
-    high_count = sum(1 for l in logs if l.severity == "high")
+    high_count = sum(1 for l in logs if is_high_or_critical(l.severity))
 
     household_stats = {}
     for log in logs:
@@ -2105,7 +2121,7 @@ def get_monthly_report(year: int, month: int, db: Session = Depends(get_db)):
         household_stats[hid]["count"] += 1
         if log.is_night:
             household_stats[hid]["night_count"] += 1
-        if log.severity == "high":
+        if is_high_or_critical(log.severity):
             household_stats[hid]["high_count"] += 1
 
     return {
@@ -2231,7 +2247,7 @@ def download_household_pdf(household_id: int, db: Session = Depends(get_db)):
     logs = db.query(models.NoiseLog).filter(models.NoiseLog.household_id == household_id).all()
     total_count = len(logs)
     night_count = sum(1 for l in logs if l.is_night)
-    high_count = sum(1 for l in logs if l.severity == "high")
+    high_count = sum(1 for l in logs if is_high_or_critical(l.severity))
     avg_sound = round(sum(l.sound_level for l in logs) / total_count, 1) if total_count > 0 else 0
 
     data = {
@@ -2275,7 +2291,7 @@ def download_monthly_pdf(year: int, month: int, db: Session = Depends(get_db)):
 
     total_count = len(logs)
     night_count = sum(1 for l in logs if l.is_night)
-    high_count = sum(1 for l in logs if l.severity == "high")
+    high_count = sum(1 for l in logs if is_high_or_critical(l.severity))
     avg_sound = round(sum(l.sound_level for l in logs) / total_count, 1) if total_count > 0 else 0
 
     data = {
@@ -2456,7 +2472,7 @@ def get_noise_distribution(building: Optional[str] = None, db: Session = Depends
         ).all()
 
         total_count = len(logs)
-        high_count = sum(1 for l in logs if l.severity == "high")
+        high_count = sum(1 for l in logs if is_high_or_critical(l.severity))
 
         # 위험도 판단
         if total_count >= 7 or high_count >= 3:
@@ -2510,7 +2526,7 @@ def export_noise_distribution(db: Session = Depends(get_db)):
         ).all()
 
         total_count = len(logs)
-        high_count = sum(1 for l in logs if l.severity == "high")
+        high_count = sum(1 for l in logs if is_high_or_critical(l.severity))
         night_count = sum(1 for l in logs if l.is_night)
 
         if total_count >= 7 or high_count >= 3:
@@ -2548,7 +2564,7 @@ def get_dashboard_households(db: Session = Depends(get_db)):
         ).all()
 
         total_today = len(logs_today)
-        high_today = sum(1 for l in logs_today if l.severity == "high")
+        high_today = sum(1 for l in logs_today if is_high_or_critical(l.severity))
         latest_log = db.query(models.NoiseLog).filter(
             models.NoiseLog.household_id == household.id
         ).order_by(models.NoiseLog.timestamp.desc()).first()
@@ -2593,7 +2609,7 @@ def get_urgent_households(db: Session = Depends(get_db)):
         ).all()
 
         total_today = len(logs_today)
-        high_today = sum(1 for l in logs_today if l.severity == "high")
+        high_today = sum(1 for l in logs_today if is_high_or_critical(l.severity))
 
         if total_today >= 7 or high_today >= 3:
             latest_log = db.query(models.NoiseLog).filter(
@@ -2682,7 +2698,7 @@ def get_hourly_stats(hours: int = 24, db: Session = Depends(get_db)):
         hour_key = f"{log.timestamp.hour:02d}"
         if hour_key in hourly:
             hourly[hour_key]["total"] += 1
-            if log.severity == "high":
+            if is_high_or_critical(log.severity):
                 hourly[hour_key]["high"] += 1
             if log.is_night:
                 hourly[hour_key]["night"] += 1
@@ -3087,7 +3103,7 @@ def get_household_noise_stats(household_id: int, db: Session = Depends(get_db)):
     ).all()
 
     total_count = len(logs)
-    high_count = sum(1 for l in logs if l.severity == "high")
+    high_count = sum(1 for l in logs if is_high_or_critical(l.severity))
     durations = [l.duration_ms for l in logs if l.duration_ms]
     avg_duration_min = round(sum(durations) / len(durations) / 60000, 1) if durations else 0
 

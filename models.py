@@ -101,7 +101,7 @@ class NoiseEvent(Base):
     sensor_id = Column(String, ForeignKey("sensors.sensor_id"))
     household_id = Column(Integer, ForeignKey("households.id"), nullable=True)
     event_type = Column(String)              # impact_noise, daily_noise, repeated_vibration, background_noise
-    severity = Column(String)               # low, medium, high
+    severity = Column(String)               # low, medium, high, critical
     severity_score = Column(Float, nullable=True)
     confidence = Column(Float, nullable=True)
     is_night = Column(Boolean, default=False)   # KST 기준 야간 판정
