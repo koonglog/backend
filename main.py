@@ -291,6 +291,44 @@ if db_init.query(models.NoiseLog).count() == 0:
         ))
     db_init.add_all(dummy_logs)
     db_init.commit()
+    if db_init.query(models.Mediation).count() == 0:
+        dummy_mediations = [
+            models.Mediation(
+                household_id=1,
+                target_unit="A동 101호",
+                ai_message="안녕하세요. 3층 거주자입니다. 밤 11시 이후 시간대에 충격성 소음이 감지되고 있습니다. 서로 편안한 주거환경을 위해 야간 시간대 소음 저감에 협조 부탁드립니다.",
+                event_summary="90.0dB의 충격음이 감지되었습니다.",
+                resident_message="위층에서 밤 11시 이후에도 계속 쿵쿵거리는 소리가 들려서 잠을 잘 수가 없습니다.",
+                admin_summary="[A동 101호] 90.0dB 충격음 감지. 야간 발생으로 주의 필요.",
+                recommended_action="quiet_time_request",
+                generation_method="template",
+                status="pending"
+            ),
+            models.Mediation(
+                household_id=2,
+                target_unit="A동 201호",
+                ai_message="안녕하세요. 5층 거주자입니다. 의자 끄는 소리가 계속 들립니다. 편안한 주거환경을 위해 협조 부탁드립니다.",
+                event_summary="65.0dB의 생활 소음이 감지되었습니다.",
+                resident_message="위층에서 의자 끄는 소리가 계속 납니다.",
+                admin_summary="[A동 201호] 65.0dB 생활 소음 감지.",
+                recommended_action="notice",
+                generation_method="template",
+                status="completed"
+            ),
+            models.Mediation(
+                household_id=1,
+                target_unit="A동 101호",
+                ai_message="안녕하세요. 야간 시간대 반복적인 충격음이 감지되었습니다. 협조 부탁드립니다.",
+                event_summary="85.0dB의 충격음이 감지되었습니다.",
+                resident_message="매일 밤 11시경 윗집에서 뛰는 소리가 납니다.",
+                admin_summary="[A동 101호] 85.0dB 충격음 감지. 야간 발생.",
+                recommended_action="quiet_time_request",
+                generation_method="template",
+                status="completed"
+            ),
+        ]
+        db_init.add_all(dummy_mediations)
+        db_init.commit()
 
 app = FastAPI(title="쿵로그(KungLog) AI 통합 서버")
 
@@ -1758,12 +1796,32 @@ def get_household_patterns(household_id: int, db: Session = Depends(get_db)):
     pattern_result = analyze_patterns_with_ai(household_id, db)
     return pattern_result
 
-@app.get("/api/v1/mediations", response_model=List[MediationResponse])
+
+@app.get("/api/v1/mediations")
 def get_mediations(status: Optional[str] = None, db: Session = Depends(get_db)):
     query = db.query(models.Mediation).order_by(models.Mediation.created_at.desc())
     if status:
         query = query.filter(models.Mediation.status == status)
-    return query.all()
+    mediations = query.all()
+
+    result = []
+    for med in mediations:
+        household = db.query(models.Household).filter(models.Household.id == med.household_id).first()
+        result.append({
+            "id": med.id,
+            "target_unit": med.target_unit,
+            "ai_message": med.ai_message,
+            "event_summary": med.event_summary,
+            "resident_message": med.resident_message,
+            "admin_summary": med.admin_summary,
+            "recommended_action": med.recommended_action,
+            "generation_method": med.generation_method,
+            "status": med.status,
+            "created_at": med.created_at,
+            "quiet_start_time": household.quiet_start_time if household else None,
+            "quiet_end_time": household.quiet_end_time if household else None
+        })
+    return result
 
 
 @app.get("/api/v1/mediations/{med_id}")
@@ -3373,4 +3431,12 @@ def get_noise_hotspot(db: Session = Depends(get_db)):
             "normal": "정상"
         }
     }
->>>>>>> a92d39d (Feat: 프론트 대시보드 요청사항 수정)
+
+@app.post("/api/v1/mediations/{med_id}/approve")
+def approve_mediation(med_id: int, db: Session = Depends(get_db)):
+    med = db.query(models.Mediation).filter(models.Mediation.id == med_id).first()
+    if not med:
+        raise HTTPException(status_code=404, detail="중재 정보를 찾을 수 없습니다.")
+    med.status = "completed"
+    db.commit()
+    return {"status": "success", "message": "메시지가 승인 및 발송되었습니다."}
