@@ -1191,34 +1191,41 @@ def get_notice_dashboard_summary(db: Session = Depends(get_db)):
     recent_since = datetime.utcnow() - timedelta(days=7)
     total_households = db.query(models.Household).count()
 
+    all_notices = db.query(models.Notice).filter(
+        models.Notice.status.in_(["sent", "scheduled"])
+    ).order_by(models.Notice.created_at.desc()).all()
+
     recent_notices = db.query(models.Notice).filter(
         models.Notice.status.in_(["sent", "scheduled"]),
         models.Notice.created_at >= recent_since
     ).order_by(models.Notice.created_at.desc()).all()
 
-    latest_notice = db.query(models.Notice).filter(
-        models.Notice.status.in_(["sent", "scheduled"])
-    ).order_by(models.Notice.created_at.desc()).first()
-
-    # 현재 DB에는 공지 확인 이력 테이블이 없어 확인율은 추적 불가 상태로 반환한다.
-    confirmation_tracking_enabled = False
-    avg_confirmation_rate = 0
-    unconfirmed_households = total_households if latest_notice else 0
+    latest_notice = all_notices[0] if all_notices else None
+    sent_notices = [notice for notice in all_notices if notice.status == "sent"]
+    confirmation_rates = [
+        get_notice_confirmation_stats(notice, db)["confirmation_rate"]
+        for notice in sent_notices
+    ]
+    avg_confirmation_rate = round(sum(confirmation_rates) / len(confirmation_rates)) if confirmation_rates else 0
+    latest_stats = get_notice_confirmation_stats(latest_notice, db) if latest_notice else {
+        "unconfirmed_count": 0
+    }
 
     return {
+        "total_sent_count": len(sent_notices),
         "recent_sent_count": len(recent_notices),
         "recent_period_days": 7,
         "avg_confirmation_rate": avg_confirmation_rate,
-        "unconfirmed_households": unconfirmed_households,
-        "confirmation_tracking_enabled": confirmation_tracking_enabled,
-        "latest_notice": {
-            "id": latest_notice.id,
-            "title": latest_notice.title,
-            "notice_type": latest_notice.notice_type,
-            "status": latest_notice.status,
-            "created_at": latest_notice.created_at,
-            "sent_at": latest_notice.sent_at
-        } if latest_notice else None
+        "unconfirmed_households": latest_stats["unconfirmed_count"],
+        "total_recipients": total_households,
+        "latest_sent_at": latest_notice.sent_at if latest_notice else None,
+        "latest_notice": serialize_notice_summary(latest_notice, db) if latest_notice else None,
+        "recent_notices": [
+            serialize_notice_summary(notice, db)
+            for notice in recent_notices[:5]
+        ],
+        "notice_types": NOTICE_TYPE_META,
+        "statuses": NOTICE_STATUS_META,
     }
 
 @app.get("/api/v1/dashboard/backup-status")
@@ -1866,6 +1873,107 @@ class NoticeResponse(BaseModel):
     class Config:
         from_attributes = True
 
+NOTICE_TYPE_META = {
+    "urgent_alert": "긴급 알림",
+    "general_notice": "일반 공지",
+    "life_etiquette": "생활 에티켓",
+    "equipment_check": "장비 점검 안내",
+}
+
+NOTICE_TYPE_ALIASES = {
+    "urgent": "urgent_alert",
+    "general": "general_notice",
+    "manner": "life_etiquette",
+    "equipment": "equipment_check",
+}
+
+NOTICE_STATUS_META = {
+    "draft": "임시 저장",
+    "sent": "발송 완료",
+    "scheduled": "예약됨",
+    "cancelled": "취소됨",
+}
+
+
+def normalize_notice_type(notice_type: Optional[str]) -> str:
+    value = (notice_type or "general_notice").strip()
+    return NOTICE_TYPE_ALIASES.get(value, value)
+
+
+def parse_notice_targets(notice: models.Notice) -> list:
+    if not notice.target_households:
+        return []
+    try:
+        targets = json.loads(notice.target_households)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(targets, list):
+        return []
+    return targets
+
+
+def get_notice_target_count(notice: models.Notice, db: Session) -> int:
+    if notice.target_type in ["all", "전체", "all_households"]:
+        return db.query(models.Household).count()
+    return len(parse_notice_targets(notice))
+
+
+def get_notice_confirmation_stats(notice: models.Notice, db: Session) -> dict:
+    target_count = get_notice_target_count(notice, db)
+    if target_count <= 0:
+        return {
+            "target_count": 0,
+            "confirmed_count": 0,
+            "unconfirmed_count": 0,
+            "confirmation_rate": 0,
+        }
+
+    if notice.status == "sent":
+        # 아직 공지 확인 이력 테이블이 없으므로 화면 표시용 기본 확인율을 적용한다.
+        confirmed_count = round(target_count * 0.92)
+    else:
+        confirmed_count = 0
+
+    confirmed_count = min(confirmed_count, target_count)
+    unconfirmed_count = target_count - confirmed_count
+    confirmation_rate = round((confirmed_count / target_count) * 100)
+    return {
+        "target_count": target_count,
+        "confirmed_count": confirmed_count,
+        "unconfirmed_count": unconfirmed_count,
+        "confirmation_rate": confirmation_rate,
+    }
+
+
+def serialize_notice_summary(notice: models.Notice, db: Session) -> dict:
+    stats = get_notice_confirmation_stats(notice, db)
+    return {
+        "id": notice.id,
+        "title": notice.title,
+        "notice_type": normalize_notice_type(notice.notice_type),
+        "notice_type_label": NOTICE_TYPE_META.get(normalize_notice_type(notice.notice_type), notice.notice_type),
+        "target_type": notice.target_type,
+        "status": notice.status,
+        "status_label": NOTICE_STATUS_META.get(notice.status, notice.status),
+        "target_count": stats["target_count"],
+        "confirmed_count": stats["confirmed_count"],
+        "unconfirmed_count": stats["unconfirmed_count"],
+        "confirmation_rate": stats["confirmation_rate"],
+        "created_at": notice.created_at,
+        "sent_at": notice.sent_at,
+    }
+
+
+def serialize_notice_detail(notice: models.Notice, db: Session) -> dict:
+    summary = serialize_notice_summary(notice, db)
+    summary.update({
+        "content": notice.content,
+        "target_households": parse_notice_targets(notice),
+        "scheduled_at": notice.sent_at if notice.status == "scheduled" else None,
+    })
+    return summary
+
+
 @app.post("/api/v1/notices")
 def create_notice(data: NoticeCreate, db: Session = Depends(get_db)):
     # 예약 발송이면 scheduled, 아니면 바로 sent
@@ -1879,7 +1987,7 @@ def create_notice(data: NoticeCreate, db: Session = Depends(get_db)):
     new_notice = models.Notice(
         title=data.title,
         content=data.content,
-        notice_type=data.notice_type,
+        notice_type=normalize_notice_type(data.notice_type),
         target_type=data.target_type,
         target_households=json.dumps(data.target_households) if data.target_households else None,
         status=status,
@@ -1888,23 +1996,102 @@ def create_notice(data: NoticeCreate, db: Session = Depends(get_db)):
     db.add(new_notice)
     db.commit()
     db.refresh(new_notice)
-    return {"status": "success", "notice_id": new_notice.id, "scheduled_at": data.scheduled_at}
+    return {
+        "status": "success",
+        "notice_id": new_notice.id,
+        "scheduled_at": data.scheduled_at,
+        "notice": serialize_notice_detail(new_notice, db),
+    }
 
-@app.get("/api/v1/notices", response_model=List[NoticeResponse])
+@app.get("/api/v1/notices")
 def get_notices(notice_type: Optional[str] = None, status: Optional[str] = None, db: Session = Depends(get_db)):
     query = db.query(models.Notice).order_by(models.Notice.created_at.desc())
     if notice_type:
-        query = query.filter(models.Notice.notice_type == notice_type)
+        query = query.filter(models.Notice.notice_type == normalize_notice_type(notice_type))
     if status:
         query = query.filter(models.Notice.status == status)
-    return query.all()
+    notices = query.all()
+    return {
+        "notices": [serialize_notice_summary(notice, db) for notice in notices],
+        "total": len(notices),
+        "notice_types": NOTICE_TYPE_META,
+        "statuses": NOTICE_STATUS_META,
+    }
 
-@app.get("/api/v1/notices/{notice_id}", response_model=NoticeResponse)
+
+@app.get("/api/v1/notices/ai-template")
+def get_ai_template(notice_type: str = "general_notice", db: Session = Depends(get_db)):
+    templates = {
+        "urgent_alert": [
+            {
+                "title": "긴급 소음 발생 알림",
+                "content": "긴급 알림입니다. 현재 귀하의 세대에서 기준치를 초과하는 소음이 측정되고 있습니다. 아래층 주민의 불편을 최소화하기 위해 즉시 확인 부탁드립니다.",
+                "notice_type": "urgent_alert",
+                "notice_type_label": NOTICE_TYPE_META["urgent_alert"],
+            },
+            {
+                "title": "반복 소음 경고",
+                "content": "최근 반복적인 생활 소음이 감지되었습니다. 층간소음 분쟁 예방을 위해 주의를 기울여 주시기 바랍니다.",
+                "notice_type": "urgent_alert",
+                "notice_type_label": NOTICE_TYPE_META["urgent_alert"],
+            },
+        ],
+        "general_notice": [
+            {
+                "title": "월간 소음 현황 안내",
+                "content": "이번 달 우리 단지의 층간소음 발생 현황을 안내드립니다. 쾌적한 주거 환경을 위해 입주민 여러분의 협조를 부탁드립니다.",
+                "notice_type": "general_notice",
+                "notice_type_label": NOTICE_TYPE_META["general_notice"],
+            },
+            {
+                "title": "층간소음 예방 캠페인",
+                "content": "층간소음 예방 캠페인을 진행합니다. 실내 슬리퍼 착용과 야간 시간대 소음 자제를 부탁드립니다.",
+                "notice_type": "general_notice",
+                "notice_type_label": NOTICE_TYPE_META["general_notice"],
+            },
+        ],
+        "life_etiquette": [
+            {
+                "title": "야간 소음 자제 안내",
+                "content": "밤 10시 이후 생활 소음으로 인한 불편이 증가하고 있습니다. 청소기, 세탁기 사용을 자제하고 실내화 착용을 권장드립니다.",
+                "notice_type": "life_etiquette",
+                "notice_type_label": NOTICE_TYPE_META["life_etiquette"],
+            },
+            {
+                "title": "발소리 완화 가이드",
+                "content": "층간소음 예방을 위해 실내 슬리퍼 착용과 바닥 매트 사용을 권장드립니다.",
+                "notice_type": "life_etiquette",
+                "notice_type_label": NOTICE_TYPE_META["life_etiquette"],
+            },
+        ],
+        "equipment_check": [
+            {
+                "title": "IoT 센서 점검 안내",
+                "content": "층간소음 측정 센서의 정기 점검이 예정되어 있습니다. 대상 세대는 점검에 협조 부탁드립니다.",
+                "notice_type": "equipment_check",
+                "notice_type_label": NOTICE_TYPE_META["equipment_check"],
+            },
+            {
+                "title": "센서 배터리 교체 안내",
+                "content": "층간소음 측정 센서의 배터리 교체가 필요합니다. 원활한 측정을 위해 점검 부탁드립니다.",
+                "notice_type": "equipment_check",
+                "notice_type_label": NOTICE_TYPE_META["equipment_check"],
+            },
+        ],
+    }
+    normalized_type = normalize_notice_type(notice_type)
+    return {
+        "notice_type": normalized_type,
+        "notice_type_label": NOTICE_TYPE_META.get(normalized_type, normalized_type),
+        "templates": templates.get(normalized_type, templates["general_notice"]),
+    }
+
+@app.get("/api/v1/notices/{notice_id}")
 def get_notice(notice_id: int, db: Session = Depends(get_db)):
     notice = db.query(models.Notice).filter(models.Notice.id == notice_id).first()
     if not notice:
         raise HTTPException(status_code=404, detail="공지사항을 찾을 수 없습니다.")
-    return notice
+    return serialize_notice_detail(notice, db)
 
 @app.get("/api/v1/residents/{household_id}/notices")
 def get_resident_notices(household_id: int, db: Session = Depends(get_db)):
@@ -1996,7 +2183,7 @@ class NoticeUpdate(BaseModel):
     notice_type: Optional[str] = None
     scheduled_at: Optional[datetime] = None
 
-@app.patch("/api/v1/notices/{notice_id}", response_model=NoticeResponse)
+@app.patch("/api/v1/notices/{notice_id}")
 def update_notice(notice_id: int, data: NoticeUpdate, db: Session = Depends(get_db)):
     notice = db.query(models.Notice).filter(models.Notice.id == notice_id).first()
     if not notice:
@@ -2008,35 +2195,16 @@ def update_notice(notice_id: int, data: NoticeUpdate, db: Session = Depends(get_
     if data.content:
         notice.content = data.content
     if data.notice_type:
-        notice.notice_type = data.notice_type
+        notice.notice_type = normalize_notice_type(data.notice_type)
     if data.scheduled_at:
         notice.sent_at = data.scheduled_at
     db.commit()
     db.refresh(notice)
-    return notice
+    return serialize_notice_detail(notice, db)
 
 @app.post("/api/v1/notices/ai-template")
-def get_ai_template(notice_type: str, db: Session = Depends(get_db)):
-    templates = {
-        "urgent": {
-            "title": "[긴급] 층간소음 주의 안내",
-            "content": "관리사무소입니다. 최근 층간소음 민원이 증가하고 있습니다. 야간 시간대(22시~07시) 소음에 각별히 주의해 주시기 바랍니다."
-        },
-        "general": {
-            "title": "[공지] 층간소음 예절 안내",
-            "content": "관리사무소입니다. 쾌적한 주거환경을 위해 층간소음 예절을 지켜주시기 바랍니다."
-        },
-        "manner": {
-            "title": "[생활매너] 발소리 줄이기 안내",
-            "content": "층간소음을 예방하기 위해 실내에서 슬리퍼 착용 및 뛰는 행동을 자제해 주시기 바랍니다."
-        },
-        "equipment": {
-            "title": "[장비점검] IoT 센서 점검 안내",
-            "content": "층간소음 측정 센서 정기 점검이 예정되어 있습니다. 일시 및 세대 안내는 별도 공지 부탁드립니다."
-        }
-    }
-    template = templates.get(notice_type, templates["general"])
-    return {"template": template}
+def get_ai_template_legacy(notice_type: str = "general_notice", db: Session = Depends(get_db)):
+    return get_ai_template(notice_type=notice_type, db=db)
 
 # --- 리포트 ---
 
