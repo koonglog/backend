@@ -39,7 +39,6 @@ class Household(Base):
     quiet_end_time = Column(String, nullable=True)    # 추가
 
 
-
 # 관리자 테이블
 class Admin(Base):
     __tablename__ = "admins"
