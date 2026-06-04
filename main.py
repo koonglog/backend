@@ -1200,30 +1200,27 @@ def get_notice_dashboard_summary(db: Session = Depends(get_db)):
         models.Notice.created_at >= recent_since
     ).order_by(models.Notice.created_at.desc()).all()
 
-    latest_notice = all_notices[0] if all_notices else None
     sent_notices = [notice for notice in all_notices if notice.status == "sent"]
     confirmation_rates = [
         get_notice_confirmation_stats(notice, db)["confirmation_rate"]
         for notice in sent_notices
     ]
     avg_confirmation_rate = round(sum(confirmation_rates) / len(confirmation_rates)) if confirmation_rates else 0
-    latest_stats = get_notice_confirmation_stats(latest_notice, db) if latest_notice else {
-        "unconfirmed_count": 0
-    }
+    recent_notice_summaries = [
+        serialize_notice_summary(notice, db)
+        for notice in recent_notices[:5]
+    ]
+    latest_notice = recent_notice_summaries[0] if recent_notice_summaries else None
+    unconfirmed_households = latest_notice["unconfirmed_count"] if latest_notice else 0
 
     return {
         "total_sent_count": len(sent_notices),
         "recent_sent_count": len(recent_notices),
         "recent_period_days": 7,
         "avg_confirmation_rate": avg_confirmation_rate,
-        "unconfirmed_households": latest_stats["unconfirmed_count"],
+        "unconfirmed_households": unconfirmed_households,
         "total_recipients": total_households,
-        "latest_sent_at": latest_notice.sent_at if latest_notice else None,
-        "latest_notice": serialize_notice_summary(latest_notice, db) if latest_notice else None,
-        "recent_notices": [
-            serialize_notice_summary(notice, db)
-            for notice in recent_notices[:5]
-        ],
+        "latest_notice": latest_notice,
         "notice_types": NOTICE_TYPE_META,
         "statuses": NOTICE_STATUS_META,
     }
