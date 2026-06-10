@@ -34,6 +34,7 @@ load_dotenv(dotenv_path="/Users/ijiho/backend/.env")
 ENABLE_OPENAI = os.getenv("ENABLE_OPENAI", "false").lower() == "true"
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if ENABLE_OPENAI else None
 AI_SERVICE_URL = os.getenv("AI_SERVICE_URL", "https://ai-production-a761.up.railway.app")
+AUTO_SEED_DEMO_DATA = os.getenv("AUTO_SEED_DEMO_DATA", "true").lower() == "true"
 DEFAULT_CORS_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000"
 CORS_ALLOWED_ORIGINS = [
     origin.strip()
@@ -339,6 +340,21 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+
+@app.on_event("startup")
+def seed_demo_data_on_startup():
+    """웹 서버 시작 시 프론트 확인용 더미 데이터를 최신 날짜로 보정한다."""
+    if not AUTO_SEED_DEMO_DATA:
+        return
+
+    try:
+        from seed_demo_data import seed_demo_data
+
+        seed_demo_data()
+    except Exception as exc:
+        print(f"[seed] demo data seeding skipped: {exc}")
+
 
 # --- Pydantic 스키마 ---
 
