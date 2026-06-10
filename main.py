@@ -2885,6 +2885,8 @@ def get_urgent_households(db: Session = Depends(get_db)):
                 "alias": household.alias,
                 "building_name": household.building_name,
                 "unit_number": household.unit_number,
+                "resident_name": household.resident_name,  # 추가
+                "phone_number": household.phone_number,  # 추가
                 "today_count": total_today,
                 "high_count": high_today,
                 "avg_duration_min": avg_duration,
