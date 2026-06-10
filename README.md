@@ -142,6 +142,3 @@ http://localhost:8000/docs
 - **API 문서**: `https://backend-production-815d.up.railway.app/docs`
 
 ---
-
-**Author**: 홍지호 (성신여자대학교 AI융합학부)  
-**Project**: 2026 Capstone Design
