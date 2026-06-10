@@ -1500,7 +1500,7 @@ def _noise_log_to_dict(log: models.NoiseLog) -> dict:
         "sound_level": log.sound_level,
         "vibration_value": log.vibration_value,
         "duration_ms": log.duration_ms,
-        "event_type": log.event_type,
+        "event_type": format_display_event_type(log.event_type),
         "severity": log.severity,
         "severity_score": log.severity_score,
         "confidence": log.confidence,
@@ -1509,6 +1509,18 @@ def _noise_log_to_dict(log: models.NoiseLog) -> dict:
         "status": log.status,
         "timestamp": log.timestamp.isoformat() if log.timestamp else None,
     }
+
+
+def format_display_vibration(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    return value - 1000 if value > 1000 else value
+
+
+def format_display_event_type(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    return "" if value.lower() == "unknown" else value
 
 
 @app.get(
@@ -1571,6 +1583,7 @@ def get_recent_noise_logs(
     effective_since = _effective_since_or_week_ago(since)
     query = db.query(models.NoiseLog).order_by(models.NoiseLog.timestamp.desc())
     query = query.filter(models.NoiseLog.timestamp >= effective_since)
+    query = query.filter(func.lower(models.NoiseLog.event_type) != "unknown")
     if household_id:
         query = query.filter(models.NoiseLog.household_id == household_id)
     logs = query.limit(limit).all()
@@ -1592,6 +1605,7 @@ def export_recent_noise_logs(
     effective_since = _effective_since_or_week_ago(since)
     query = db.query(models.NoiseLog).order_by(models.NoiseLog.timestamp.desc())
     query = query.filter(models.NoiseLog.timestamp >= effective_since)
+    query = query.filter(func.lower(models.NoiseLog.event_type) != "unknown")
     if household_id:
         query = query.filter(models.NoiseLog.household_id == household_id)
     logs = query.limit(limit).all()
@@ -1661,11 +1675,7 @@ def get_recent_sensor_readings(
         "sound_level",
         "vibration_value",
         "duration_ms",
-        "acceleration_x",
-        "acceleration_y",
-        "acceleration_z",
-        "received_at",
-        "sensor_timestamp"
+        "time"
     ]
     rows = [
         [
@@ -1673,13 +1683,9 @@ def get_recent_sensor_readings(
             reading.sensor_id,
             reading.household_id,
             reading.sound_level,
-            reading.vibration_value,
+            format_display_vibration(reading.vibration_value),
             reading.duration_ms,
-            reading.acceleration_x,
-            reading.acceleration_y,
-            reading.acceleration_z,
-            format_kst(reading.received_at),
-            format_kst(reading.sensor_timestamp)
+            format_kst(reading.received_at)
         ]
         for reading in readings
     ]
@@ -1703,6 +1709,7 @@ def get_recent_noise_events_api(
     """AI가 의미 있는 이벤트로 판단해 noise_events에 저장된 최근 이벤트를 테이블 형태로 조회"""
     safe_limit = min(max(limit, 1), 100)
     query = db.query(models.NoiseEvent).order_by(models.NoiseEvent.started_at.desc())
+    query = query.filter(func.lower(models.NoiseEvent.event_type) != "unknown")
     if household_id:
         query = query.filter(models.NoiseEvent.household_id == household_id)
     events = query.limit(safe_limit).all()
@@ -1717,36 +1724,24 @@ def get_recent_noise_events_api(
         "confidence",
         "is_night",
         "is_meaningful",
-        "pattern_label",
         "avg_sound_level",
-        "max_sound_level",
         "avg_vibration",
-        "duration_ms",
-        "sample_count",
-        "started_at",
-        "ended_at",
-        "status"
+        "time"
     ]
     rows = [
         [
             event.id,
             event.sensor_id,
             event.household_id,
-            event.event_type,
+            format_display_event_type(event.event_type),
             event.severity,
             event.severity_score,
             event.confidence,
             event.is_night,
             event.is_meaningful,
-            event.pattern_label,
             event.avg_sound_level,
-            event.max_sound_level,
-            event.avg_vibration,
-            event.duration_ms,
-            event.sample_count,
-            format_kst(event.started_at),
-            format_kst(event.ended_at),
-            event.status
+            format_display_vibration(event.avg_vibration),
+            format_kst(event.started_at)
         ]
         for event in events
     ]
@@ -1771,7 +1766,7 @@ def get_noise_event(event_id: int, db: Session = Depends(get_db)):
         "id": event.id,
         "sensor_id": event.sensor_id,
         "household_id": event.household_id,
-        "event_type": event.event_type,
+        "event_type": format_display_event_type(event.event_type),
         "severity": event.severity,
         "severity_score": event.severity_score,
         "confidence": event.confidence,
@@ -1780,7 +1775,7 @@ def get_noise_event(event_id: int, db: Session = Depends(get_db)):
         "pattern_label": event.pattern_label,
         "avg_sound_level": event.avg_sound_level,
         "max_sound_level": event.max_sound_level,
-        "avg_vibration": event.avg_vibration,
+        "avg_vibration": format_display_vibration(event.avg_vibration),
         "duration_ms": event.duration_ms,
         "sample_count": event.sample_count,
         "started_at": event.started_at,
