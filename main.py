@@ -2931,13 +2931,16 @@ def get_completed_actions(db: Session = Depends(get_db)):
         models.Mediation.status == "completed"
     ).order_by(models.Mediation.created_at.desc()).all()
 
+    admin = db.query(models.Admin).first()
+
     return {"completed": [
         {
             "id": m.id,
             "target_unit": m.target_unit,
             "admin_summary": m.admin_summary,
             "recommended_action": m.recommended_action,
-            "created_at": m.created_at
+            "created_at": m.created_at,
+            "admin_name": admin.name if admin else None
         } for m in mediations
     ], "total": len(mediations)}
 
