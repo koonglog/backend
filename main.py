@@ -1512,11 +1512,16 @@ def _effective_since_or_week_ago(since: Optional[datetime]) -> datetime:
     return datetime.now(UTC).replace(tzinfo=None) - timedelta(days=7)
 
 
-def _noise_log_to_dict(log: models.NoiseLog) -> dict:
+def _noise_log_to_dict(log: models.NoiseLog, household: Optional[models.Household] = None) -> dict:
     return {
         "id": log.id,
         "sensor_id": log.sensor_id,
         "household_id": log.household_id,
+        "apartment_name": household.apartment_name if household else None,
+        "building_name": household.building_name if household else None,
+        "unit_number": household.unit_number if household else None,
+        "floor": household.floor if household else None,
+        "alias": household.alias if household else None,
         "sound_level": log.sound_level,
         "vibration_value": log.vibration_value,
         "duration_ms": log.duration_ms,
@@ -1559,6 +1564,11 @@ def format_display_event_type(value: Optional[str]) -> Optional[str]:
                                 "id": 1506,
                                 "sensor_id": "SENSOR-A101-01",
                                 "household_id": 1,
+                                "apartment_name": "쿵로그아파트",
+                                "building_name": "A동",
+                                "unit_number": "101호",
+                                "floor": 1,
+                                "alias": "A-101",
                                 "sound_level": 90.0,
                                 "vibration_value": 1000.0,
                                 "duration_ms": 3000,
@@ -1575,6 +1585,11 @@ def format_display_event_type(value: Optional[str]) -> Optional[str]:
                                 "id": 1505,
                                 "sensor_id": "SENSOR-A101-01",
                                 "household_id": 1,
+                                "apartment_name": "쿵로그아파트",
+                                "building_name": "A동",
+                                "unit_number": "101호",
+                                "floor": 1,
+                                "alias": "A-101",
                                 "sound_level": 55.0,
                                 "vibration_value": 700.0,
                                 "duration_ms": 3000,
@@ -1607,11 +1622,18 @@ def get_recent_noise_logs(
     if household_id:
         query = query.filter(models.NoiseLog.household_id == household_id)
     logs = query.limit(limit).all()
+    household_ids = {log.household_id for log in logs if log.household_id}
+    households = {}
+    if household_ids:
+        households = {
+            household.id: household
+            for household in db.query(models.Household).filter(models.Household.id.in_(household_ids)).all()
+        }
     return {
         "since": effective_since.isoformat(),
         "limit": limit,
         "total": len(logs),
-        "logs": [_noise_log_to_dict(log) for log in logs],
+        "logs": [_noise_log_to_dict(log, households.get(log.household_id)) for log in logs],
     }
 
 
@@ -2787,13 +2809,37 @@ def export_noise_distribution(db: Session = Depends(get_db)):
 # --- 대시보드 ---
 
 @app.get("/api/v1/dashboard/households")
-def get_dashboard_households(building: Optional[str] = None, db: Session = Depends(get_db)):
+def get_dashboard_households(
+    building: Optional[str] = Query(None, description="동 이름 필터. 예: A동"),
+    search: Optional[str] = Query(None, description="동/호수/별칭/입주민명 검색어"),
+    status_filter: Optional[str] = Query(None, alias="status", description="상태 필터: urgent, caution, normal"),
+    db: Session = Depends(get_db)
+):
     """전체 모니터링 세대 목록"""
-    households = db.query(models.Household).all()
+    if status_filter and status_filter not in {"urgent", "caution", "normal"}:
+        raise HTTPException(status_code=400, detail="status는 urgent, caution, normal 중 하나여야 합니다.")
+
+    query = db.query(models.Household)
+    if building:
+        query = query.filter(models.Household.building_name == building)
+    households = query.order_by(models.Household.building_name, models.Household.unit_number).all()
     today = date.today()
 
     result = []
     for household in households:
+        display_unit = f"{household.building_name} {household.unit_number}".strip()
+        if search:
+            keyword = search.lower()
+            searchable = " ".join([
+                str(household.building_name or ""),
+                str(household.unit_number or ""),
+                str(household.alias or ""),
+                str(household.resident_name or ""),
+                display_unit,
+            ]).lower()
+            if keyword not in searchable:
+                continue
+
         logs_today = db.query(models.NoiseLog).filter(
             models.NoiseLog.household_id == household.id,
             func.date(models.NoiseLog.timestamp) == today
@@ -2808,28 +2854,54 @@ def get_dashboard_households(building: Optional[str] = None, db: Session = Depen
         if total_today >= 7 or high_today >= 3:
             status = "urgent"
             status_label = "즉시 대응 필요"
+            status_color = "red"
         elif total_today >= 3:
             status = "caution"
             status_label = "관찰 필요"
+            status_color = "orange"
         else:
             status = "normal"
             status_label = "정상"
+            status_color = "green"
+
+        if status_filter and status_filter != status:
+            continue
 
         result.append({
             "household_id": household.id,
+            "apartment_name": household.apartment_name,
             "alias": household.alias,
+            "display_unit": display_unit,
             "building_name": household.building_name,
             "unit_number": household.unit_number,
-            "resident_name": household.resident_name,  # 추가
-            "phone_number": household.phone_number,  # 추가
+            "floor": household.floor,
+            "resident_name": household.resident_name,
+            "phone_number": household.phone_number,
             "status": status,
             "status_label": status_label,
+            "status_color": status_color,
             "today_count": total_today,
             "high_count": high_today,
-            "latest_time": latest_log.timestamp if latest_log else None
+            "latest_time": latest_log.timestamp if latest_log else None,
+            "latest_time_text": format_kst(latest_log.timestamp) if latest_log else None,
+            "latest_event_type": format_display_event_type(latest_log.event_type) if latest_log else None,
+            "latest_severity": latest_log.severity if latest_log else None
         })
 
-    return {"households": result, "total": len(result)}
+    return {
+        "households": result,
+        "total": len(result),
+        "filters": {
+            "building": building,
+            "search": search,
+            "status": status_filter
+        },
+        "status_labels": {
+            "urgent": "즉시 대응 필요",
+            "caution": "관찰 필요",
+            "normal": "정상"
+        }
+    }
 
 @app.get("/api/v1/dashboard/urgent")
 def get_urgent_households(db: Session = Depends(get_db)):
