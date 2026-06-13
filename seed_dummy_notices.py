@@ -70,15 +70,6 @@ def build_dummy_notices():
             "sent_at": base_time - timedelta(days=4, hours=2),
         },
         {
-            "title": "긴급 소음 발생 알림",
-            "content": "기준치를 초과하는 소음이 감지되었습니다. 해당 세대는 즉시 확인 후 소음 저감에 협조 부탁드립니다.",
-            "notice_type": "urgent_alert",
-            "target_type": "selected",
-            "target_households": [9],
-            "status": "sent",
-            "sent_at": base_time - timedelta(days=5, hours=4),
-        },
-        {
             "title": "주말 생활 소음 안내",
             "content": "주말 오전과 야간 시간대에는 생활 소음이 크게 전달될 수 있습니다. 입주민 여러분의 배려를 부탁드립니다.",
             "notice_type": "life_etiquette",
@@ -105,6 +96,10 @@ def seed_dummy_notices() -> None:
 
     # Remove only broken dummy rows created by console encoding issues.
     cur.execute("DELETE FROM notices WHERE title LIKE '%?%'")
+    cur.execute(
+        "DELETE FROM notices WHERE title IN (?, ?)",
+        ("긴급 소음 발생 알림", "string"),
+    )
 
     added = []
     updated = []
