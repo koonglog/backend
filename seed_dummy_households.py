@@ -28,7 +28,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "301",
         "floor": 3,
         "alias": "A-301",
-        "resident_name": "Resident A301",
+        "resident_name": "김민준",
         "phone_number": "010-2001-0301",
         "quiet_start_time": "22:00",
         "quiet_end_time": "07:00",
@@ -41,7 +41,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "302",
         "floor": 3,
         "alias": "A-302",
-        "resident_name": "Resident A302",
+        "resident_name": "이서연",
         "phone_number": "010-2001-0302",
         "quiet_start_time": "23:00",
         "quiet_end_time": "06:30",
@@ -54,7 +54,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "401",
         "floor": 4,
         "alias": "A-401",
-        "resident_name": "Resident A401",
+        "resident_name": "박지훈",
         "phone_number": "010-2001-0401",
     },
     {
@@ -65,7 +65,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "402",
         "floor": 4,
         "alias": "A-402",
-        "resident_name": "Resident A402",
+        "resident_name": "최유진",
         "phone_number": "010-2001-0402",
         "quiet_start_time": "21:30",
         "quiet_end_time": "06:00",
@@ -78,7 +78,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "201",
         "floor": 2,
         "alias": "B-201",
-        "resident_name": "Resident B201",
+        "resident_name": "정하늘",
         "phone_number": "010-2002-0201",
         "quiet_start_time": "22:00",
         "quiet_end_time": "08:00",
@@ -91,7 +91,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "202",
         "floor": 2,
         "alias": "B-202",
-        "resident_name": "Resident B202",
+        "resident_name": "강도윤",
         "phone_number": "010-2002-0202",
     },
     {
@@ -102,7 +102,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "301",
         "floor": 3,
         "alias": "B-301",
-        "resident_name": "Resident B301",
+        "resident_name": "조수빈",
         "phone_number": "010-2002-0301",
         "quiet_start_time": "23:30",
         "quiet_end_time": "07:30",
@@ -115,7 +115,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "302",
         "floor": 3,
         "alias": "B-302",
-        "resident_name": "Resident B302",
+        "resident_name": "윤서준",
         "phone_number": "010-2002-0302",
         "quiet_start_time": "22:00",
         "quiet_end_time": "06:00",
@@ -128,7 +128,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "101",
         "floor": 1,
         "alias": "C-101",
-        "resident_name": "Resident C101",
+        "resident_name": "장예린",
         "phone_number": "010-2003-0101",
     },
     {
@@ -139,7 +139,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "102",
         "floor": 1,
         "alias": "C-102",
-        "resident_name": "Resident C102",
+        "resident_name": "임지호",
         "phone_number": "010-2003-0102",
         "quiet_start_time": "21:00",
         "quiet_end_time": "06:00",
@@ -152,7 +152,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "201",
         "floor": 2,
         "alias": "C-201",
-        "resident_name": "Resident C201",
+        "resident_name": "한지민",
         "phone_number": "010-2003-0201",
         "quiet_start_time": "22:30",
         "quiet_end_time": "07:00",
@@ -165,7 +165,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "202",
         "floor": 2,
         "alias": "C-202",
-        "resident_name": "Resident C202",
+        "resident_name": "오세훈",
         "phone_number": "010-2003-0202",
     },
     {
@@ -176,7 +176,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "101",
         "floor": 1,
         "alias": "D-101",
-        "resident_name": "Resident D101",
+        "resident_name": "신유나",
         "phone_number": "010-2004-0101",
         "quiet_start_time": "23:00",
         "quiet_end_time": "08:00",
@@ -189,7 +189,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "102",
         "floor": 1,
         "alias": "D-102",
-        "resident_name": "Resident D102",
+        "resident_name": "서지우",
         "phone_number": "010-2004-0102",
         "quiet_start_time": "22:00",
         "quiet_end_time": "07:00",
@@ -202,7 +202,7 @@ DUMMY_HOUSEHOLDS = [
         "unit_number": "201",
         "floor": 2,
         "alias": "D-201",
-        "resident_name": "Resident D201",
+        "resident_name": "권민서",
         "phone_number": "010-2004-0201",
     },
 ]
@@ -214,6 +214,7 @@ def seed_dummy_households() -> None:
     try:
         password_hash = hash_password(DEFAULT_PASSWORD)
         added = []
+        updated = []
 
         for item in DUMMY_HOUSEHOLDS:
             exists = (
@@ -225,6 +226,19 @@ def seed_dummy_households() -> None:
                 .first()
             )
             if exists:
+                changed = False
+                for key, value in item.items():
+                    if getattr(exists, key, None) != value:
+                        setattr(exists, key, value)
+                        changed = True
+                if not exists.password_hash:
+                    exists.password_hash = password_hash
+                    changed = True
+                if exists.is_active is None:
+                    exists.is_active = True
+                    changed = True
+                if changed:
+                    updated.append(item["username"])
                 continue
 
             household = models.Household(
@@ -239,6 +253,7 @@ def seed_dummy_households() -> None:
         total = db.query(models.Household).count()
 
         print(f"Added households: {len(added)}")
+        print(f"Updated households: {len(updated)}")
         print(f"Total households: {total}")
         if added:
             print("Added usernames:")
