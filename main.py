@@ -175,7 +175,7 @@ db_init = next(get_db())
 
 if db_init.query(models.Household).count() == 0:
     households = [
-        models.Household(username="aster03", email="aster03@koonglog.com", password_hash=hash_password("resident1234"), apartment_name="쿵로그아파트", building_name="A동", unit_number="101호", floor=1, alias="A-101", resident_name="김철수", phone_number="010-1234-5678", is_active=True),
+        models.Household(username="aster03", email="aster03@koonglog.com", password_hash=hash_password("resident1234"), apartment_name="쿵로그아파트", building_name="A동", unit_number="101호", floor=1, alias="A-101", resident_name="김철수", phone_number="010-1234-5678", is_active=True, quiet_start_time="22:00", quiet_end_time="07:00"),
         models.Household(username="resident201", email="resident201@koonglog.com", password_hash=hash_password("resident1234"), apartment_name="쿵로그아파트", building_name="A동", unit_number="201호", floor=2, alias="A-201", resident_name="이영희", phone_number="010-2345-6789", is_active=True),
         models.Household(username="resident102", email="resident102@koonglog.com", password_hash=hash_password("resident1234"), apartment_name="쿵로그아파트", building_name="B동", unit_number="102호", floor=1, alias="B-102", resident_name="박민수", phone_number="010-3456-7890", is_active=True),
     ]
@@ -212,6 +212,10 @@ else:
             changed = True
         if household.is_active is None:
             household.is_active = True
+            changed = True
+        if not household.quiet_start_time and index == 0:
+            household.quiet_start_time = "22:00"
+            household.quiet_end_time = "07:00"
             changed = True
     if changed:
         db_init.commit()
@@ -2111,65 +2115,38 @@ def get_notices(notice_type: Optional[str] = None, status: Optional[str] = None,
 
 
 @app.get("/api/v1/notices/ai-template")
-def get_ai_template(notice_type: str = "general_notice", db: Session = Depends(get_db)):
+def get_ai_template(notice_type: Optional[str] = None, db: Session = Depends(get_db)):
     templates = {
         "urgent_alert": [
-            {
-                "title": "긴급 소음 발생 알림",
-                "content": "긴급 알림입니다. 현재 귀하의 세대에서 기준치를 초과하는 소음이 측정되고 있습니다. 아래층 주민의 불편을 최소화하기 위해 즉시 확인 부탁드립니다.",
-                "notice_type": "urgent_alert",
-                "notice_type_label": NOTICE_TYPE_META["urgent_alert"],
-            },
-            {
-                "title": "반복 소음 경고",
-                "content": "최근 반복적인 생활 소음이 감지되었습니다. 층간소음 분쟁 예방을 위해 주의를 기울여 주시기 바랍니다.",
-                "notice_type": "urgent_alert",
-                "notice_type_label": NOTICE_TYPE_META["urgent_alert"],
-            },
+            {"title": "긴급 소음 발생 알림", "content": "긴급 알림입니다. 현재 귀하의 세대에서 기준치를 초과하는 소음이 측정되고 있습니다. 아래층 주민의 불편을 최소화하기 위해 즉시 확인 부탁드립니다.", "notice_type": "urgent_alert", "notice_type_label": NOTICE_TYPE_META["urgent_alert"]},
+            {"title": "반복 소음 경고", "content": "최근 반복적인 생활 소음이 감지되었습니다. 층간소음 분쟁 예방을 위해 주의를 기울여 주시기 바랍니다.", "notice_type": "urgent_alert", "notice_type_label": NOTICE_TYPE_META["urgent_alert"]},
         ],
         "general_notice": [
-            {
-                "title": "월간 소음 현황 안내",
-                "content": "이번 달 우리 단지의 층간소음 발생 현황을 안내드립니다. 쾌적한 주거 환경을 위해 입주민 여러분의 협조를 부탁드립니다.",
-                "notice_type": "general_notice",
-                "notice_type_label": NOTICE_TYPE_META["general_notice"],
-            },
-            {
-                "title": "층간소음 예방 캠페인",
-                "content": "층간소음 예방 캠페인을 진행합니다. 실내 슬리퍼 착용과 야간 시간대 소음 자제를 부탁드립니다.",
-                "notice_type": "general_notice",
-                "notice_type_label": NOTICE_TYPE_META["general_notice"],
-            },
+            {"title": "월간 소음 현황 안내", "content": "이번 달 우리 단지의 층간소음 발생 현황을 안내드립니다. 쾌적한 주거 환경을 위해 입주민 여러분의 협조를 부탁드립니다.", "notice_type": "general_notice", "notice_type_label": NOTICE_TYPE_META["general_notice"]},
+            {"title": "층간소음 예방 캠페인", "content": "층간소음 예방 캠페인을 진행합니다. 실내 슬리퍼 착용과 야간 시간대 소음 자제를 부탁드립니다.", "notice_type": "general_notice", "notice_type_label": NOTICE_TYPE_META["general_notice"]},
         ],
         "life_etiquette": [
-            {
-                "title": "야간 소음 자제 안내",
-                "content": "밤 10시 이후 생활 소음으로 인한 불편이 증가하고 있습니다. 청소기, 세탁기 사용을 자제하고 실내화 착용을 권장드립니다.",
-                "notice_type": "life_etiquette",
-                "notice_type_label": NOTICE_TYPE_META["life_etiquette"],
-            },
-            {
-                "title": "발소리 완화 가이드",
-                "content": "층간소음 예방을 위해 실내 슬리퍼 착용과 바닥 매트 사용을 권장드립니다.",
-                "notice_type": "life_etiquette",
-                "notice_type_label": NOTICE_TYPE_META["life_etiquette"],
-            },
+            {"title": "야간 소음 자제 안내", "content": "밤 10시 이후 생활 소음으로 인한 불편이 증가하고 있습니다. 청소기, 세탁기 사용을 자제하고 실내화 착용을 권장드립니다.", "notice_type": "life_etiquette", "notice_type_label": NOTICE_TYPE_META["life_etiquette"]},
+            {"title": "발소리 완화 가이드", "content": "층간소음 예방을 위해 실내 슬리퍼 착용과 바닥 매트 사용을 권장드립니다.", "notice_type": "life_etiquette", "notice_type_label": NOTICE_TYPE_META["life_etiquette"]},
         ],
         "equipment_check": [
-            {
-                "title": "IoT 센서 점검 안내",
-                "content": "층간소음 측정 센서의 정기 점검이 예정되어 있습니다. 대상 세대는 점검에 협조 부탁드립니다.",
-                "notice_type": "equipment_check",
-                "notice_type_label": NOTICE_TYPE_META["equipment_check"],
-            },
-            {
-                "title": "센서 배터리 교체 안내",
-                "content": "층간소음 측정 센서의 배터리 교체가 필요합니다. 원활한 측정을 위해 점검 부탁드립니다.",
-                "notice_type": "equipment_check",
-                "notice_type_label": NOTICE_TYPE_META["equipment_check"],
-            },
+            {"title": "IoT 센서 점검 안내", "content": "층간소음 측정 센서의 정기 점검이 예정되어 있습니다. 대상 세대는 점검에 협조 부탁드립니다.", "notice_type": "equipment_check", "notice_type_label": NOTICE_TYPE_META["equipment_check"]},
+            {"title": "센서 배터리 교체 안내", "content": "층간소음 측정 센서의 배터리 교체가 필요합니다. 원활한 측정을 위해 점검 부탁드립니다.", "notice_type": "equipment_check", "notice_type_label": NOTICE_TYPE_META["equipment_check"]},
         ],
     }
+
+    if not notice_type:
+        return {
+            "all_templates": {
+                ntype: {
+                    "notice_type": ntype,
+                    "notice_type_label": NOTICE_TYPE_META.get(ntype, ntype),
+                    "templates": tmpls
+                }
+                for ntype, tmpls in templates.items()
+            }
+        }
+
     normalized_type = normalize_notice_type(notice_type)
     return {
         "notice_type": normalized_type,
@@ -2945,7 +2922,6 @@ def get_completed_actions(db: Session = Depends(get_db)):
     ], "total": len(mediations)}
 
 @app.get("/api/v1/dashboard/hourly")
-@app.get("/api/v1/dashboard/hourly")
 def get_hourly_stats(hours: int = 24, db: Session = Depends(get_db)):
     now = datetime.now()
     since = now - timedelta(hours=hours)
@@ -2953,23 +2929,7 @@ def get_hourly_stats(hours: int = 24, db: Session = Depends(get_db)):
         models.NoiseLog.timestamp >= since
     ).all()
 
-    hourly = {}
-    for i in range(hours):
-        hour = (now - timedelta(hours=hours-1-i)).hour
-        hourly[f"{hour:02d}"] = {"total": 0, "high": 0, "night": 0}
-
-    for log in logs:
-        hour_key = f"{log.timestamp.hour:02d}"
-        if hour_key in hourly:
-            hourly[hour_key]["total"] += 1
-            if is_high_or_critical(log.severity):
-                hourly[hour_key]["high"] += 1
-            if log.is_night:
-                hourly[hour_key]["night"] += 1
-
-    return {"hourly": hourly, "period": f"최근 {hours}시간"}
     if hours == 1:
-        # 5분 간격
         intervals = {}
         for i in range(12):
             key = (now - timedelta(minutes=55 - i*5)).strftime("%H:%M")
@@ -2979,7 +2939,7 @@ def get_hourly_stats(hours: int = 24, db: Session = Depends(get_db)):
             key = log.timestamp.strftime(f"%H:{minute:02d}")
             if key in intervals:
                 intervals[key]["total"] += 1
-                if log.severity == "high":
+                if is_high_or_critical(log.severity):
                     intervals[key]["high"] += 1
                 if log.is_night:
                     intervals[key]["night"] += 1
@@ -2993,7 +2953,7 @@ def get_hourly_stats(hours: int = 24, db: Session = Depends(get_db)):
             hour_key = f"{log.timestamp.hour:02d}"
             if hour_key in hourly:
                 hourly[hour_key]["total"] += 1
-                if log.severity == "high":
+                if is_high_or_critical(log.severity):
                     hourly[hour_key]["high"] += 1
                 if log.is_night:
                     hourly[hour_key]["night"] += 1
@@ -3429,7 +3389,7 @@ def get_noise_hotspot(db: Session = Depends(get_db)):
         else:
             risk_level = "normal"
 
-        bname = household.building_name
+        bname = household.building_name.replace("동", "").strip() + "동"
         if bname not in buildings:
             buildings[bname] = {"urgent": 0, "caution": 0, "normal": 0, "total": 0}
 
@@ -3443,6 +3403,33 @@ def get_noise_hotspot(db: Session = Depends(get_db)):
             "caution": "관찰 필요",
             "normal": "정상"
         }
+    }
+
+@app.get("/api/v1/dashboard/households/by-building")
+def get_households_by_building(db: Session = Depends(get_db)):
+    """공지 작성용 동별 세대 목록"""
+    households = db.query(models.Household).order_by(
+        models.Household.building_name, models.Household.unit_number
+    ).all()
+
+    buildings = {}
+    for household in households:
+        bname = household.building_name.replace("동", "").strip() + "동"
+        if bname not in buildings:
+            buildings[bname] = []
+        buildings[bname].append({
+            "household_id": household.id,
+            "unit_number": household.unit_number,
+            "floor": household.floor,
+            "alias": household.alias,
+            "resident_name": household.resident_name,
+            "phone_number": household.phone_number,
+        })
+
+    return {
+        "buildings": buildings,
+        "building_names": list(buildings.keys()),
+        "total": sum(len(v) for v in buildings.values())
     }
 
 @app.post("/api/v1/mediations/{med_id}/approve")
